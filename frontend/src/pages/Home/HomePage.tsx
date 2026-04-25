@@ -1,0 +1,181 @@
+import { useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
+import {
+  ArrowRight, Briefcase, LineChart, Droplet, ShieldAlert, Banknote,
+  Building2, Activity, FileSpreadsheet,
+} from 'lucide-react'
+import api from '@/lib/api'
+import { useAuthStore } from '@/store/authStore'
+import type { BusinessFunction } from '@/types'
+
+const ICONS: Record<string, any> = {
+  briefcase: Briefcase,
+  'line-chart': LineChart,
+  droplet: Droplet,
+  'shield-alert': ShieldAlert,
+  banknote: Banknote,
+  'building-2': Building2,
+  activity: Activity,
+  'file-spreadsheet': FileSpreadsheet,
+}
+
+export default function HomePage() {
+  const { username, role, department } = useAuthStore()
+  const navigate = useNavigate()
+  const [functions, setFunctions] = useState<BusinessFunction[]>([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    api.get<BusinessFunction[]>('/api/functions')
+      .then((r) => setFunctions(r.data))
+      .finally(() => setLoading(false))
+  }, [])
+
+  const greeting = (() => {
+    const h = new Date().getHours()
+    if (h < 12) return 'Good morning'
+    if (h < 18) return 'Good afternoon'
+    return 'Good evening'
+  })()
+
+  // Group by topic, preserving the order the backend listed categories in
+  const byCategory: Record<string, BusinessFunction[]> = {}
+  const categoryOrder: string[] = []
+  for (const f of functions) {
+    if (!(f.category in byCategory)) {
+      byCategory[f.category] = []
+      categoryOrder.push(f.category)
+    }
+    byCategory[f.category].push(f)
+  }
+
+  return (
+    <div className="max-w-[1320px] mx-auto animate-fade-in">
+      <div className="mb-8">
+        <h1 className="page-header">
+          {greeting}, {username}.
+        </h1>
+        <p className="text-sm" style={{ color: 'var(--text-muted)' }}>
+          Pick a function below to open its workspace. Each one ships with default analytical
+          views and a domain-aware AI agent. Configure data sources, agent skills, and your own
+          plots from <button onClick={() => navigate('/settings')} style={{ color: 'var(--accent)', fontWeight: 600 }}>Settings</button>.
+        </p>
+      </div>
+
+      {/* User context strip */}
+      <div className="panel mb-8 flex items-center gap-6 flex-wrap">
+        <ContextField label="Analyst" value={username || ''} />
+        <Sep />
+        <ContextField label="Role" value={role || ''} />
+        <Sep />
+        <ContextField label="Department" value={department || ''} />
+        <Sep />
+        <ContextField label="As of" value={new Date().toLocaleDateString()} />
+      </div>
+
+      {loading && <div style={{ color: 'var(--text-muted)' }}>Loading functions…</div>}
+
+      {categoryOrder.map((cat) => {
+        const fns = byCategory[cat]
+        return (
+        <section key={cat} className="mb-10">
+          <div
+            className="flex items-center gap-2 mb-4"
+            style={{ color: 'var(--text-secondary)' }}
+          >
+            <span
+              style={{
+                fontSize: 11, fontWeight: 700, letterSpacing: '0.12em',
+                textTransform: 'uppercase',
+              }}
+            >
+              {cat}
+            </span>
+            <div
+              className="flex-1 h-px"
+              style={{ background: 'var(--border)' }}
+            />
+            <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{fns.length} functions</span>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {fns.map((f) => {
+              const Icon = ICONS[f.icon] || Briefcase
+              return (
+                <button
+                  key={f.id}
+                  onClick={() => navigate(`/workspace/${f.id}`)}
+                  className="text-left transition-all group"
+                  style={{
+                    background: 'var(--bg-card)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 12,
+                    padding: 20,
+                  }}
+                  onMouseEnter={(e) => {
+                    const el = e.currentTarget as HTMLElement
+                    el.style.borderColor = f.color
+                    el.style.transform = 'translateY(-2px)'
+                    el.style.boxShadow = `0 12px 28px ${f.color}1F`
+                  }}
+                  onMouseLeave={(e) => {
+                    const el = e.currentTarget as HTMLElement
+                    el.style.borderColor = 'var(--border)'
+                    el.style.transform = 'translateY(0)'
+                    el.style.boxShadow = 'none'
+                  }}
+                >
+                  <div className="flex items-start justify-between mb-3">
+                    <div
+                      className="w-10 h-10 rounded-xl flex items-center justify-center"
+                      style={{ background: `${f.color}1A`, color: f.color }}
+                    >
+                      <Icon size={18} />
+                    </div>
+                    <ArrowRight
+                      size={16}
+                      className="transition-transform group-hover:translate-x-1"
+                      style={{ color: 'var(--text-muted)' }}
+                    />
+                  </div>
+                  <div className="font-display text-base font-semibold mb-1" style={{ color: 'var(--text-primary)' }}>
+                    {f.name}
+                  </div>
+                  <p
+                    className="text-xs mb-3"
+                    style={{ color: 'var(--text-secondary)', lineHeight: 1.55 }}
+                  >
+                    {f.description}
+                  </p>
+                  <div className="flex flex-wrap gap-1">
+                    {f.sample_metrics.slice(0, 4).map((m) => (
+                      <span key={m} className="pill" style={{ fontSize: 10 }}>
+                        {m}
+                      </span>
+                    ))}
+                  </div>
+                </button>
+              )
+            })}
+          </div>
+        </section>
+        )
+      })}
+    </div>
+  )
+}
+
+function ContextField({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <div className="metric-label">{label}</div>
+      <div className="text-sm font-semibold mt-0.5" style={{ color: 'var(--text-primary)' }}>
+        {value}
+      </div>
+    </div>
+  )
+}
+
+function Sep() {
+  return <div className="h-8 w-px" style={{ background: 'var(--border)' }} />
+}

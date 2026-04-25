@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# Node
+node_modules/
+dist/
+.vite/
+*.log
+
+# Editor
+.vscode/
+.idea/
+.DS_Store
+
+# Local Claude Code settings
+.claude/
+
+# Backend runtime data (created by uploads at runtime)
+backend/data/datasets/
+backend/data/models/
