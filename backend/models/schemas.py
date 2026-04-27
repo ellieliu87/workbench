@@ -14,12 +14,14 @@ class LoginResponse(BaseModel):
     username: str
     role: str
     department: str
+    groups: list[str] = Field(default_factory=list)
 
 
 class UserInfo(BaseModel):
     username: str
     role: str
     department: str
+    groups: list[str] = Field(default_factory=list)
 
 
 # ── Business Functions ──────────────────────────────────────────────────────
@@ -81,12 +83,32 @@ class ChatMessage(BaseModel):
     function_id: str | None = None
     agent_id: str = "orchestrator"
     context: str | None = None
+    # Specialist routing inputs
+    tab: Literal[
+        "overview", "data", "models", "workflow", "playbooks",
+        "analytics", "reporting", "settings",
+    ] | None = None
+    entity_kind: Literal["kpi", "dataset", "scenario", "model", "run", "tile", "workflow"] | None = None
+    entity_id: str | None = None
+    # Optional payload — for workflow validation we pass nodes/edges
+    payload: dict[str, Any] | None = None
+
+
+class ChatAction(BaseModel):
+    """A clickable suggestion an agent surfaces — e.g. 'apply this filter'."""
+    kind: Literal["apply_filter", "open_tab", "run_validation", "troubleshoot", "noop"]
+    label: str
+    target: str | None = None  # tile_id / run_id / model_id depending on kind
+    payload: dict[str, Any] | None = None
 
 
 class ChatResponse(BaseModel):
     response: str
     agent_id: str
     agent_name: str
+    agent_color: str | None = None
+    agent_icon: str | None = None
+    actions: list[ChatAction] = Field(default_factory=list)
 
 
 class AgentInfo(BaseModel):
@@ -125,6 +147,8 @@ class AgentSkill(BaseModel):
     enabled: bool
     instructions: str | None = None
     tools: list[str] = Field(default_factory=list)
+    source: Literal["builtin", "user", "pack"] = "builtin"
+    pack_id: str | None = None  # populated when source == 'pack'
 
 
 class AgentSkillCreate(BaseModel):
@@ -161,6 +185,8 @@ class PythonTool(BaseModel):
     function_name: str
     enabled: bool = True
     last_test_result: dict[str, Any] | None = None
+    source: Literal["builtin", "user", "pack"] = "user"
+    pack_id: str | None = None  # populated when source == 'pack'
 
 
 class PythonToolCreate(BaseModel):
@@ -182,6 +208,178 @@ class PythonToolUpdate(BaseModel):
 
 class ToolTestRequest(BaseModel):
     args: dict[str, Any] = Field(default_factory=dict)
+
+
+class ToolDraftRequest(BaseModel):
+    prompt: str  # plain-English description of what the tool should do
+    context: str | None = None  # optional extra context (existing tools, data sources)
+
+
+class ToolDraftResponse(BaseModel):
+    name: str
+    description: str
+    function_name: str
+    parameters: list[ToolParameter] = Field(default_factory=list)
+    python_source: str
+    notes: str | None = None  # any caveats the agent wants to flag
+
+
+# ── Self-serve Analytics ────────────────────────────────────────────────────
+# A user-defined analytic is a small JSON spec the runner translates into
+# pandas operations (Aggregate, Compare) or executes as user-supplied Python
+# (CustomPython). The shape is intentionally generic so it works across any
+# business function — the user binds their own datasets and dimensions.
+
+class AnalyticInputs(BaseModel):
+    """Inputs are references to existing artifacts in the workspace.
+    Most primitives use a single dataset; Compare uses two; CustomPython
+    can take an arbitrary list."""
+    dataset_id: str | None = None
+    dataset_id_b: str | None = None  # for Compare
+    dataset_ids: list[str] = Field(default_factory=list)  # for CustomPython
+    run_id: str | None = None
+    scenario_id: str | None = None
+
+
+class AggregateMeasure(BaseModel):
+    column: str
+    agg: Literal["sum", "avg", "count", "min", "max", "median",
+                 "p25", "p75", "p90", "p99", "weighted_avg", "stddev"]
+    alias: str | None = None
+    weight_by: str | None = None  # required when agg == 'weighted_avg'
+
+
+class AggregateSpec(BaseModel):
+    group_by: list[str] = Field(default_factory=list)
+    measures: list[AggregateMeasure] = Field(default_factory=list)
+    filters: list[dict[str, Any]] = Field(default_factory=list)  # [{column, op, value}]
+    sort_by: str | None = None
+    sort_desc: bool = True
+    limit: int | None = 100
+
+
+class CompareSpec(BaseModel):
+    group_by: list[str] = Field(default_factory=list)
+    measure: AggregateMeasure
+    label_a: str = "A"
+    label_b: str = "B"
+    show_pct_change: bool = True
+
+
+class CustomPythonSpec(BaseModel):
+    function_name: str = "run"
+    python_source: str
+    # The function receives a dict mapping each input dataset id → pandas
+    # DataFrame and must return a dict shaped like AnalyticResult below.
+
+
+class AnalyticOutput(BaseModel):
+    chart_type: Literal["bar", "line", "area", "stacked_bar", "scatter", "pie", "table", "kpi"] = "bar"
+    x_field: str | None = None
+    y_fields: list[str] = Field(default_factory=list)
+    description: str | None = None
+
+
+class AnalyticDefinition(BaseModel):
+    id: str
+    function_id: str
+    name: str
+    description: str = ""
+    kind: Literal["aggregate", "compare", "custom_python"]
+    inputs: AnalyticInputs = Field(default_factory=AnalyticInputs)
+    aggregate_spec: AggregateSpec | None = None
+    compare_spec: CompareSpec | None = None
+    custom_python_spec: CustomPythonSpec | None = None
+    output: AnalyticOutput = Field(default_factory=AnalyticOutput)
+    parameters: dict[str, Any] = Field(default_factory=dict)  # user-tunable knobs
+    created_at: str
+    updated_at: str | None = None
+    created_by: str | None = None
+
+
+class AnalyticDefinitionCreate(BaseModel):
+    function_id: str
+    name: str
+    description: str = ""
+    kind: Literal["aggregate", "compare", "custom_python"]
+    inputs: AnalyticInputs = Field(default_factory=AnalyticInputs)
+    aggregate_spec: AggregateSpec | None = None
+    compare_spec: CompareSpec | None = None
+    custom_python_spec: CustomPythonSpec | None = None
+    output: AnalyticOutput = Field(default_factory=AnalyticOutput)
+    parameters: dict[str, Any] = Field(default_factory=dict)
+
+
+class AnalyticDefinitionUpdate(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    kind: Literal["aggregate", "compare", "custom_python"] | None = None
+    inputs: AnalyticInputs | None = None
+    aggregate_spec: AggregateSpec | None = None
+    compare_spec: CompareSpec | None = None
+    custom_python_spec: CustomPythonSpec | None = None
+    output: AnalyticOutput | None = None
+    parameters: dict[str, Any] | None = None
+
+
+class AnalyticResultTable(BaseModel):
+    columns: list[str]
+    rows: list[list[Any]]
+
+
+class AnalyticResultChart(BaseModel):
+    type: str
+    x_field: str | None = None
+    y_fields: list[str] = Field(default_factory=list)
+    data: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class AnalyticResultKpi(BaseModel):
+    label: str
+    value: str
+    sublabel: str | None = None
+
+
+class AnalyticResult(BaseModel):
+    table: AnalyticResultTable | None = None
+    chart: AnalyticResultChart | None = None
+    kpis: list[AnalyticResultKpi] = Field(default_factory=list)
+
+
+class AnalyticDefinitionRun(BaseModel):
+    id: str
+    definition_id: str
+    function_id: str
+    name: str  # snapshot of definition name
+    kind: str
+    status: Literal["completed", "failed"]
+    result: AnalyticResult | None = None
+    narrative: str | None = None
+    error: str | None = None
+    created_at: str
+    duration_ms: float = 0.0
+
+
+class AnalyticDraftRequest(BaseModel):
+    function_id: str
+    prompt: str
+    available_datasets: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class AnalyticDraftResponse(BaseModel):
+    name: str
+    description: str
+    kind: Literal["aggregate", "compare", "custom_python"]
+    inputs: AnalyticInputs = Field(default_factory=AnalyticInputs)
+    aggregate_spec: AggregateSpec | None = None
+    compare_spec: CompareSpec | None = None
+    custom_python_spec: CustomPythonSpec | None = None
+    output: AnalyticOutput = Field(default_factory=AnalyticOutput)
+    notes: str | None = None
+
+
+class AnalyticNarrationResponse(BaseModel):
+    markdown: str
 
 
 class ToolTestResponse(BaseModel):
@@ -214,6 +412,7 @@ class Dataset(BaseModel):
     size_bytes: int | None = None
     created_at: str
     last_synced: str | None = None
+    pack_id: str | None = None  # set when seeded by a domain pack
 
 
 class DatasetCreateFromTable(BaseModel):
@@ -257,8 +456,10 @@ class TrainedModel(BaseModel):
     artifactory_uri: str | None = None
     file_format: str | None = None
     size_bytes: int | None = None
+    introspection: dict[str, Any] | None = None
     created_at: str
     last_run: str | None = None
+    pack_id: str | None = None  # set when seeded by a domain pack
 
 
 class RegressionRequest(BaseModel):
@@ -308,7 +509,10 @@ class AnalyticsRun(BaseModel):
     model_id: str
     scenario_id: str | None = None
     dataset_id: str | None = None
-    input_kind: Literal["scenario", "dataset"] = "scenario"
+    input_kind: Literal["scenario", "dataset", "workflow"] = "scenario"
+    workflow_id: str | None = None
+    workflow_step_index: int | None = None
+    input_node_ids: list[str] = Field(default_factory=list)
     horizon_months: int = 12
     status: Literal["completed", "failed", "running"]
     summary: dict[str, Any] = Field(default_factory=dict)
@@ -329,17 +533,184 @@ class RunRequest(BaseModel):
     notes: str | None = None
 
 
+# ── Workflow runs (multi-node DAG) ─────────────────────────────────────────
+class WorkflowNode(BaseModel):
+    id: str  # client-side node id
+    kind: Literal["dataset", "scenario", "model", "destination"]
+    ref_id: str  # dataset/scenario/model id, OR destination kind for destination nodes
+    config: dict[str, Any] = Field(default_factory=dict)
+
+
+class WorkflowEdge(BaseModel):
+    source: str  # source node id
+    target: str  # target node id
+
+
+class WorkflowRequest(BaseModel):
+    function_id: str
+    name: str | None = None
+    nodes: list[WorkflowNode]
+    edges: list[WorkflowEdge]
+    horizon_months: int = 12
+    notes: str | None = None
+
+
+class DestinationWrite(BaseModel):
+    node_id: str
+    kind: Literal["snowflake_table", "onelake_table", "s3", "csv"]
+    target: str
+    upstream_model_id: str
+    upstream_run_id: str
+    rows_written: int
+    status: Literal["written", "failed"]
+    note: str | None = None
+    # CSV writes return their data so the browser can trigger a download
+    csv_filename: str | None = None
+    csv_data: list[dict[str, Any]] | None = None
+
+
+class WorkflowResult(BaseModel):
+    workflow_id: str
+    status: Literal["completed", "failed", "partial"]
+    runs: list[AnalyticsRun] = Field(default_factory=list)
+    destinations: list[DestinationWrite] = Field(default_factory=list)
+    node_status: dict[str, Literal["idle", "running", "completed", "failed", "skipped"]] = Field(default_factory=dict)
+    error: str | None = None
+    duration_ms: float = 0.0
+
+
+class WorkflowValidationIssue(BaseModel):
+    severity: Literal["error", "warning", "info"]
+    message: str
+    node_id: str | None = None
+
+
+class WorkflowValidationResult(BaseModel):
+    ok: bool
+    issues: list[WorkflowValidationIssue] = Field(default_factory=list)
+
+
+# ── Playbooks (analyst-defined agentic workflows) ──────────────────────────
+class PlaybookPhaseInput(BaseModel):
+    kind: Literal["dataset", "scenario", "phase_output", "prompt"]
+    ref_id: str | None = None  # dataset_id / scenario_id / "phase-2"
+    text: str | None = None    # for kind=='prompt'
+
+
+class PlaybookPhase(BaseModel):
+    id: str  # logical id within the playbook ("phase-1", "phase-2", ...)
+    name: str
+    skill_name: str            # references agent/skills/<name>.md
+    instructions: str | None = None
+    inputs: list[PlaybookPhaseInput] = Field(default_factory=list)
+    gate: bool = False         # if True, wait for analyst approve/modify/reject
+
+
+class Playbook(BaseModel):
+    id: str
+    function_id: str
+    name: str
+    description: str | None = None
+    phases: list[PlaybookPhase] = Field(default_factory=list)
+    created_at: str
+    updated_at: str | None = None
+
+
+class PlaybookCreate(BaseModel):
+    function_id: str
+    name: str
+    description: str | None = None
+    phases: list[PlaybookPhase] = Field(default_factory=list)
+
+
+class PlaybookUpdate(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    phases: list[PlaybookPhase] | None = None
+
+
+class TraceStep(BaseModel):
+    """One observable event from an agent's run — a tool call, its result, a
+    sub-agent handoff, a reasoning block, or the final message. Rendered as a
+    transparency timeline under each PhaseExecution."""
+    kind: Literal["tool_call", "tool_output", "message", "reasoning", "handoff", "info"]
+    label: str  # one-line summary, e.g. "called get_workspace" or "final message"
+    detail: str | None = None  # JSON / text payload, possibly truncated
+    tool_name: str | None = None
+    agent_name: str | None = None  # which agent emitted this (handoff support)
+    truncated: bool = False
+    at: str | None = None  # ISO timestamp
+
+
+class PhaseExecution(BaseModel):
+    phase_id: str
+    phase_name: str
+    skill_name: str
+    status: Literal["idle", "running", "awaiting_gate", "completed", "rejected", "failed"]
+    output: str | None = None  # markdown response from the agent
+    agent_id: str | None = None
+    gate_decision: Literal["approve", "modify", "reject"] | None = None
+    gate_notes: str | None = None
+    duration_ms: float = 0.0
+    error: str | None = None
+    started_at: str | None = None
+    completed_at: str | None = None
+    trace: list[TraceStep] = Field(default_factory=list)
+
+
+class PlaybookRun(BaseModel):
+    id: str
+    playbook_id: str
+    playbook_name: str
+    function_id: str
+    status: Literal["running", "awaiting_gate", "completed", "rejected", "failed"]
+    phases: list[PhaseExecution] = Field(default_factory=list)
+    current_phase_idx: int = 0
+    final_report: str | None = None
+    created_at: str
+    completed_at: str | None = None
+
+
+class GateDecisionRequest(BaseModel):
+    decision: Literal["approve", "modify", "reject"]
+    notes: str | None = None
+    modified_output: str | None = None
+
+
+class PublishedReport(BaseModel):
+    id: str
+    function_id: str
+    playbook_id: str
+    playbook_name: str
+    run_id: str
+    title: str
+    body_markdown: str
+    published_by: str
+    published_at: str
+
+
+class PublishRequest(BaseModel):
+    title: str | None = None
+
+
 # ── Plot Builder ────────────────────────────────────────────────────────────
 class PlotConfig(BaseModel):
     id: str
     function_id: str | None = None
     name: str
-    chart_type: Literal["line", "bar", "area", "pie", "scatter", "stacked_bar"]
+    tile_type: Literal["plot", "table"] = "plot"
+    chart_type: Literal["line", "bar", "area", "pie", "scatter", "stacked_bar"] = "line"
     data_source_id: str | None = None
     dataset_id: str | None = None
     run_id: str | None = None
-    x_field: str
-    y_fields: list[str]
+    pinned_to_overview: bool = False
+    # For table tiles
+    table_columns: list[str] | None = None
+    table_default_sort: str | None = None
+    table_default_sort_desc: bool = False
+    # For plot tiles
+    x_field: str = ""
+    y_fields: list[str] = Field(default_factory=list)
     aggregation: Literal["sum", "avg", "count", "min", "max", "none"] = "none"
     filters: list[dict[str, Any]] = Field(default_factory=list)
     description: str | None = None
@@ -348,12 +719,17 @@ class PlotConfig(BaseModel):
 class PlotConfigCreate(BaseModel):
     function_id: str | None = None
     name: str
-    chart_type: Literal["line", "bar", "area", "pie", "scatter", "stacked_bar"]
+    tile_type: Literal["plot", "table"] = "plot"
+    chart_type: Literal["line", "bar", "area", "pie", "scatter", "stacked_bar"] = "line"
     data_source_id: str | None = None
     dataset_id: str | None = None
     run_id: str | None = None
-    x_field: str
-    y_fields: list[str]
+    pinned_to_overview: bool = False
+    table_columns: list[str] | None = None
+    table_default_sort: str | None = None
+    table_default_sort_desc: bool = False
+    x_field: str = ""
+    y_fields: list[str] = Field(default_factory=list)
     aggregation: Literal["sum", "avg", "count", "min", "max", "none"] = "none"
     filters: list[dict[str, Any]] = Field(default_factory=list)
     description: str | None = None

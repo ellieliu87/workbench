@@ -1,5 +1,5 @@
 import {
-  Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, Legend, Line, LineChart,
+  Area, AreaChart, Bar, BarChart, Brush, CartesianGrid, Cell, Legend, Line, LineChart,
   Pie, PieChart, ResponsiveContainer, Scatter, ScatterChart, Tooltip, XAxis, YAxis,
 } from 'recharts'
 import type { ChartSpec } from '@/types'
@@ -18,10 +18,13 @@ const tooltipStyle = {
 interface Props {
   spec: ChartSpec
   height?: number
+  /** Show a brush for x-axis zoom on line / area / bar charts. Off by default. */
+  brushable?: boolean
 }
 
-export default function Chart({ spec, height = 240 }: Props) {
+export default function Chart({ spec, height = 240, brushable = false }: Props) {
   const { type, data, x_key, y_keys } = spec
+  const showBrush = brushable && data.length > 12 && (type === 'line' || type === 'area' || type === 'bar' || type === 'stacked_bar')
 
   if (type === 'line') {
     return (
@@ -35,6 +38,9 @@ export default function Chart({ spec, height = 240 }: Props) {
           {y_keys.map((k, i) => (
             <Line key={k} type="monotone" dataKey={k} stroke={COLORS[i % COLORS.length]} strokeWidth={2} dot={{ r: 2.5 }} activeDot={{ r: 5 }} />
           ))}
+          {showBrush && (
+            <Brush dataKey={x_key} height={20} stroke="var(--accent)" travellerWidth={6} />
+          )}
         </LineChart>
       </ResponsiveContainer>
     )
@@ -59,6 +65,9 @@ export default function Chart({ spec, height = 240 }: Props) {
           {y_keys.map((k, i) => (
             <Area key={k} type="monotone" dataKey={k} stroke={COLORS[i % COLORS.length]} fill={`url(#grad-${k})`} strokeWidth={2} />
           ))}
+          {showBrush && (
+            <Brush dataKey={x_key} height={20} stroke="var(--accent)" travellerWidth={6} />
+          )}
         </AreaChart>
       </ResponsiveContainer>
     )
@@ -82,6 +91,9 @@ export default function Chart({ spec, height = 240 }: Props) {
               radius={[4, 4, 0, 0]}
             />
           ))}
+          {showBrush && (
+            <Brush dataKey={x_key} height={20} stroke="var(--accent)" travellerWidth={6} />
+          )}
         </BarChart>
       </ResponsiveContainer>
     )

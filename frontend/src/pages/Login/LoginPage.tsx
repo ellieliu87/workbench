@@ -7,8 +7,8 @@ import { useAuthStore } from '@/store/authStore'
 export default function LoginPage() {
   const navigate = useNavigate()
   const setAuth = useAuthStore((s) => s.setAuth)
-  const [username, setUsername] = useState('demo')
-  const [password, setPassword] = useState('capital1')
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
 
@@ -110,17 +110,6 @@ export default function LoginPage() {
           >
             {loading ? 'Signing in…' : 'Sign in'}
           </button>
-
-          <div className="mt-4 pt-4" style={{ borderTop: '1px solid var(--border-subtle)' }}>
-            <div
-              className="text-[11px]"
-              style={{ color: 'var(--text-muted)', fontFamily: 'JetBrains Mono, monospace' }}
-            >
-              Demo users: alice · bob · carol · david · demo
-              <br />
-              Password: capital1
-            </div>
-          </div>
         </form>
       </div>
     </div>

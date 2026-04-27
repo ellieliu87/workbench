@@ -2,9 +2,10 @@ import { useEffect, useRef, useState } from 'react'
 import {
   Database, FileText, Trash2, Upload, Plus, X, Search,
   Snowflake, Cloud, HardDrive, Globe, Eye, Sparkles, Loader2,
-  FlaskConical,
+  FlaskConical, ShieldCheck,
 } from 'lucide-react'
 import api from '@/lib/api'
+import { useChatStore } from '@/store/chatStore'
 import type {
   Dataset, DatasetPreview, DataSource, DataSourceTable,
 } from '@/types'
@@ -117,12 +118,30 @@ interface SectionProps {
 }
 
 function DatasetsSection({ functionId, functionName, onAskAgent }: SectionProps) {
+  const setEntity = useChatStore((s) => s.setEntity)
+  const setOpen = useChatStore((s) => s.setOpen)
   const [datasets, setDatasets] = useState<Dataset[]>([])
   const [sources, setSources] = useState<DataSource[]>([])
   const [loading, setLoading] = useState(true)
   const [previewFor, setPreviewFor] = useState<Dataset | null>(null)
   const [bindOpen, setBindOpen] = useState(false)
   const [uploadOpen, setUploadOpen] = useState(false)
+
+  const runQualityCheck = (d: Dataset) => {
+    setEntity('dataset', d.id)
+    setOpen(true)
+    window.dispatchEvent(new CustomEvent('cma-chat', {
+      detail: `Run a data quality audit on "${d.name}".`
+    }))
+  }
+
+  const explainDataset = (d: Dataset) => {
+    setEntity('dataset', d.id)
+    setOpen(true)
+    window.dispatchEvent(new CustomEvent('cma-chat', {
+      detail: `Tell me about the "${d.name}" dataset — what's in it, how analysts typically use it.`
+    }))
+  }
 
   const load = () => {
     setLoading(true)
@@ -231,7 +250,8 @@ function DatasetsSection({ functionId, functionName, onAskAgent }: SectionProps)
             sourceName={sources.find((s) => s.id === d.data_source_id)?.name}
             onPreview={() => setPreviewFor(d)}
             onDelete={() => remove(d.id)}
-            onAskAgent={onAskAgent}
+            onExplain={() => explainDataset(d)}
+            onQualityCheck={() => runQualityCheck(d)}
           />
         ))}
       </div>
@@ -264,13 +284,14 @@ function DatasetsSection({ functionId, functionName, onAskAgent }: SectionProps)
 
 // ── Dataset card ───────────────────────────────────────────────────────────
 function DatasetCard({
-  dataset, sourceName, onPreview, onDelete, onAskAgent,
+  dataset, sourceName, onPreview, onDelete, onExplain, onQualityCheck,
 }: {
   dataset: Dataset
   sourceName?: string
   onPreview: () => void
   onDelete: () => void
-  onAskAgent: (q: string) => void
+  onExplain: () => void
+  onQualityCheck: () => void
 }) {
   const isUpload = dataset.source_kind === 'upload'
   const meta = isUpload ? SOURCE_TYPE_META.file_upload : SOURCE_TYPE_META.snowflake
@@ -337,7 +358,17 @@ function DatasetCard({
         </div>
         <div className="flex gap-1">
           <button
-            onClick={() => onAskAgent(`Tell me about the dataset "${dataset.name}" (${dataset.columns.length} columns).`)}
+            onClick={onQualityCheck}
+            className="p-1.5 rounded-md transition-colors"
+            style={{ color: 'var(--text-muted)' }}
+            title="Run data quality check"
+            onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.color = '#059669')}
+            onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.color = 'var(--text-muted)')}
+          >
+            <ShieldCheck size={13} />
+          </button>
+          <button
+            onClick={onExplain}
             className="p-1.5 rounded-md transition-colors"
             style={{ color: 'var(--text-muted)' }}
             title="Ask agent"
@@ -555,98 +586,231 @@ function UploadFileModal({
   onClose: () => void
   onCreated: () => void
 }) {
-  const [file, setFile] = useState<File | null>(null)
-  const [name, setName] = useState('')
+  const [files, setFiles] = useState<File[]>([])
+  const [names, setNames] = useState<Record<number, string>>({})
   const [description, setDescription] = useState('')
   const [saving, setSaving] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null)
+  const [errors, setErrors] = useState<{ file: string; message: string }[]>([])
   const inputRef = useRef<HTMLInputElement>(null)
 
-  const onFile = (f: File | null) => {
-    setFile(f)
-    if (f && !name) setName(f.name.split('.').slice(0, -1).join('.') || f.name)
+  const addFiles = (incoming: FileList | null) => {
+    if (!incoming || incoming.length === 0) return
+    const next = Array.from(incoming)
+    setFiles((prev) => {
+      // de-dupe by name+size
+      const seen = new Set(prev.map((f) => `${f.name}-${f.size}`))
+      const filtered = next.filter((f) => !seen.has(`${f.name}-${f.size}`))
+      return [...prev, ...filtered]
+    })
   }
 
-  const submit = async () => {
-    if (!file) return
-    setSaving(true)
-    setError(null)
-    const fd = new FormData()
-    fd.append('function_id', functionId)
-    fd.append('file', file)
-    if (name) fd.append('name', name)
-    if (description) fd.append('description', description)
-    try {
-      await api.post('/api/datasets/upload', fd, {
-        headers: { 'Content-Type': 'multipart/form-data' },
+  const removeAt = (idx: number) => {
+    setFiles((prev) => prev.filter((_, i) => i !== idx))
+    setNames((prev) => {
+      const out: Record<number, string> = {}
+      Object.entries(prev).forEach(([k, v]) => {
+        const ki = Number(k)
+        if (ki < idx) out[ki] = v
+        else if (ki > idx) out[ki - 1] = v
       })
-      onCreated()
-    } catch (e: any) {
-      setError(e?.response?.data?.detail || 'Upload failed')
-    } finally {
-      setSaving(false)
+      return out
+    })
+  }
+
+  const setNameAt = (idx: number, value: string) => {
+    setNames((prev) => ({ ...prev, [idx]: value }))
+  }
+
+  const totalBytes = files.reduce((s, f) => s + f.size, 0)
+
+  const submit = async () => {
+    if (files.length === 0) return
+    setSaving(true)
+    setErrors([])
+    setProgress({ done: 0, total: files.length })
+    const failures: { file: string; message: string }[] = []
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i]
+      const fd = new FormData()
+      fd.append('function_id', functionId)
+      fd.append('file', file)
+      const stem = file.name.split('.').slice(0, -1).join('.') || file.name
+      const finalName = (names[i] && names[i].trim()) || stem
+      fd.append('name', finalName)
+      if (description) fd.append('description', description)
+      try {
+        await api.post('/api/datasets/upload', fd, {
+          headers: { 'Content-Type': 'multipart/form-data' },
+        })
+      } catch (e: any) {
+        failures.push({
+          file: file.name,
+          message: e?.response?.data?.detail || 'Upload failed',
+        })
+      }
+      setProgress({ done: i + 1, total: files.length })
     }
+    setErrors(failures)
+    setSaving(false)
+    if (failures.length === 0) onCreated()
   }
 
   return (
-    <Modal title="Upload Dataset File" onClose={onClose}>
-      <Field label="File (CSV / Parquet / XLSX / JSON, max 50 MB)">
+    <Modal title="Upload Dataset Files" onClose={onClose}>
+      <Field label="Files (CSV / Parquet / XLSX / JSON, max 50 MB each — multi-select supported)">
         <input
           ref={inputRef}
           type="file"
+          multiple
           accept=".csv,.parquet,.xlsx,.xls,.json"
-          onChange={(e) => onFile(e.target.files?.[0] || null)}
+          onChange={(e) => {
+            addFiles(e.target.files)
+            if (inputRef.current) inputRef.current.value = ''
+          }}
           className="hidden"
         />
         <button
           onClick={() => inputRef.current?.click()}
-          className="w-full rounded-lg py-6 text-sm transition-colors"
+          className="w-full rounded-lg py-5 text-sm transition-colors"
           style={{
             background: 'var(--bg-elevated)',
-            border: `1.5px dashed ${file ? 'var(--accent)' : 'var(--border)'}`,
-            color: file ? 'var(--accent)' : 'var(--text-muted)',
+            border: `1.5px dashed ${files.length > 0 ? 'var(--accent)' : 'var(--border)'}`,
+            color: files.length > 0 ? 'var(--accent)' : 'var(--text-muted)',
           }}
         >
-          {file ? (
+          {files.length > 0 ? (
             <div>
-              <div className="font-semibold">{file.name}</div>
+              <div className="font-semibold">
+                {files.length} file{files.length === 1 ? '' : 's'} selected · {formatBytes(totalBytes)} total
+              </div>
               <div className="text-[11px] mt-0.5" style={{ color: 'var(--text-muted)' }}>
-                {formatBytes(file.size)} · click to change
+                Click to add more
               </div>
             </div>
           ) : (
             <>
               <Upload size={20} style={{ display: 'inline-block', marginRight: 6 }} />
-              Click to choose a file
+              Click to choose files (you can pick multiple)
             </>
           )}
         </button>
       </Field>
 
-      <div className="grid grid-cols-2 gap-3">
-        <Field label="Dataset name">
-          <input value={name} onChange={(e) => setName(e.target.value)} className="input" />
-        </Field>
-        <Field label="Description (optional)">
-          <input
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            className="input"
-          />
-        </Field>
-      </div>
+      {files.length > 0 && (
+        <div
+          className="rounded-lg overflow-hidden"
+          style={{ border: '1px solid var(--border)' }}
+        >
+          {files.map((f, i) => {
+            const stem = f.name.split('.').slice(0, -1).join('.') || f.name
+            return (
+              <div
+                key={`${f.name}-${i}`}
+                className="flex items-center gap-2 px-3 py-2"
+                style={{
+                  background: i % 2 === 0 ? 'var(--bg-card)' : 'var(--bg-elevated)',
+                  borderBottom: i < files.length - 1 ? '1px solid var(--border-subtle)' : 'none',
+                }}
+              >
+                <FileText size={13} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
+                <div
+                  className="text-[12px] font-mono truncate min-w-0 flex-1"
+                  style={{ color: 'var(--text-secondary)' }}
+                  title={f.name}
+                >
+                  {f.name}
+                </div>
+                <input
+                  className="input"
+                  style={{ width: 200, padding: '4px 8px', fontSize: 12 }}
+                  placeholder={stem}
+                  value={names[i] ?? ''}
+                  onChange={(e) => setNameAt(i, e.target.value)}
+                  title="Override the dataset name (defaults to filename stem)"
+                  disabled={saving}
+                />
+                <span
+                  className="text-[10px] font-mono shrink-0"
+                  style={{ color: 'var(--text-muted)', width: 70, textAlign: 'right' }}
+                >
+                  {formatBytes(f.size)}
+                </span>
+                <button
+                  onClick={() => removeAt(i)}
+                  disabled={saving}
+                  className="p-1 rounded shrink-0"
+                  style={{ color: 'var(--text-muted)' }}
+                  title="Remove from list"
+                >
+                  <X size={12} />
+                </button>
+              </div>
+            )
+          })}
+        </div>
+      )}
 
-      {error && (
+      <Field label="Description (optional — applied to all uploaded datasets)">
+        <input
+          className="input"
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+          disabled={saving}
+        />
+      </Field>
+
+      {progress && (
+        <div
+          className="rounded-md px-3 py-2 text-xs flex items-center gap-2"
+          style={{
+            background: 'var(--accent-light)',
+            color: 'var(--accent)',
+          }}
+        >
+          <span style={{ fontWeight: 600 }}>
+            {saving ? 'Uploading…' : 'Done'}
+          </span>
+          <span className="font-mono">
+            {progress.done} / {progress.total}
+          </span>
+          <div
+            className="flex-1 h-1.5 rounded-full"
+            style={{ background: 'var(--bg-elevated)' }}
+          >
+            <div
+              className="h-full rounded-full transition-all"
+              style={{
+                width: `${(progress.done / progress.total) * 100}%`,
+                background: 'var(--accent)',
+              }}
+            />
+          </div>
+        </div>
+      )}
+
+      {errors.length > 0 && (
         <div className="text-xs px-3 py-2 rounded-md" style={{ background: 'var(--error-bg)', color: 'var(--error)' }}>
-          {error}
+          <div className="font-semibold mb-1">{errors.length} upload{errors.length === 1 ? '' : 's'} failed:</div>
+          <ul className="space-y-0.5 font-mono">
+            {errors.map((e, i) => (
+              <li key={i}>· <strong>{e.file}</strong> — {e.message}</li>
+            ))}
+          </ul>
         </div>
       )}
 
       <ModalFooter
         onClose={onClose}
         onSubmit={submit}
-        disabled={!file || saving}
-        submitLabel={saving ? 'Uploading…' : 'Upload & Bind'}
+        disabled={files.length === 0 || saving}
+        submitLabel={
+          saving
+            ? `Uploading ${progress?.done ?? 0}/${progress?.total ?? files.length}…`
+            : files.length === 0
+              ? 'Upload & Bind'
+              : `Upload & Bind ${files.length} File${files.length === 1 ? '' : 's'}`
+        }
       />
     </Modal>
   )

@@ -4,6 +4,7 @@ import {
   TrendingUp, FileBox, Loader2,
 } from 'lucide-react'
 import api from '@/lib/api'
+import { useChatStore } from '@/store/chatStore'
 import type {
   TrainedModel, Dataset, ModelMetricsResponse,
 } from '@/types'
@@ -177,6 +178,7 @@ function ModelCard({
   onDelete: () => void
   onAskAgent: (q: string) => void
 }) {
+  const setEntity = useChatStore((s) => s.setEntity)
   const badge = SOURCE_BADGE[model.source_kind]
   const Icon = model.source_kind === 'regression' ? Activity : model.source_kind === 'upload' ? FileBox : Link2
 
@@ -241,7 +243,10 @@ function ModelCard({
         </div>
         <div className="flex gap-1">
           <button
-            onClick={() => onAskAgent(`Explain the model "${model.name}" — ${TYPE_LABEL[model.model_type]}.`)}
+            onClick={() => {
+              setEntity('model', model.id)
+              onAskAgent(`Explain the model "${model.name}" in detail.`)
+            }}
             className="p-1.5 rounded-md transition-colors"
             style={{ color: 'var(--text-muted)' }}
             title="Ask agent"
@@ -438,91 +443,228 @@ function UploadModelModal({
   onClose: () => void
   onCreated: () => void
 }) {
-  const [file, setFile] = useState<File | null>(null)
-  const [name, setName] = useState('')
+  const [files, setFiles] = useState<File[]>([])
+  const [names, setNames] = useState<Record<number, string>>({})
   const [description, setDescription] = useState('')
   const [saving, setSaving] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null)
+  const [errors, setErrors] = useState<{ file: string; message: string }[]>([])
   const inputRef = useRef<HTMLInputElement>(null)
 
+  const addFiles = (incoming: FileList | null) => {
+    if (!incoming || incoming.length === 0) return
+    const next = Array.from(incoming)
+    setFiles((prev) => {
+      // de-dupe by name+size
+      const seen = new Set(prev.map((f) => `${f.name}-${f.size}`))
+      const filtered = next.filter((f) => !seen.has(`${f.name}-${f.size}`))
+      return [...prev, ...filtered]
+    })
+  }
+
+  const removeAt = (idx: number) => {
+    setFiles((prev) => prev.filter((_, i) => i !== idx))
+    setNames((prev) => {
+      const out: Record<number, string> = {}
+      Object.entries(prev).forEach(([k, v]) => {
+        const ki = Number(k)
+        if (ki < idx) out[ki] = v
+        else if (ki > idx) out[ki - 1] = v
+      })
+      return out
+    })
+  }
+
+  const setNameAt = (idx: number, value: string) => {
+    setNames((prev) => ({ ...prev, [idx]: value }))
+  }
+
+  const totalBytes = files.reduce((s, f) => s + f.size, 0)
+
   const submit = async () => {
-    if (!file) return
+    if (files.length === 0) return
     setSaving(true)
-    setError(null)
-    const fd = new FormData()
-    fd.append('function_id', functionId)
-    fd.append('file', file)
-    if (name) fd.append('name', name)
-    if (description) fd.append('description', description)
-    try {
-      await api.post('/api/models/upload', fd, { headers: { 'Content-Type': 'multipart/form-data' } })
-      onCreated()
-    } catch (e: any) {
-      setError(e?.response?.data?.detail || 'Upload failed')
-    } finally {
-      setSaving(false)
+    setErrors([])
+    setProgress({ done: 0, total: files.length })
+    const failures: { file: string; message: string }[] = []
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i]
+      const fd = new FormData()
+      fd.append('function_id', functionId)
+      fd.append('file', file)
+      const stem = file.name.split('.').slice(0, -1).join('.') || file.name
+      const finalName = (names[i] && names[i].trim()) || stem
+      fd.append('name', finalName)
+      if (description) fd.append('description', description)
+      try {
+        await api.post('/api/models/upload', fd, { headers: { 'Content-Type': 'multipart/form-data' } })
+      } catch (e: any) {
+        failures.push({
+          file: file.name,
+          message: e?.response?.data?.detail || 'Upload failed',
+        })
+      }
+      setProgress({ done: i + 1, total: files.length })
     }
+    setErrors(failures)
+    setSaving(false)
+    if (failures.length === 0) onCreated()
   }
 
   return (
-    <Modal title="Upload Model Artifact" onClose={onClose}>
-      <Field label="File (PKL / Joblib / ONNX / JSON, max 50 MB)">
+    <Modal title="Upload Model Artifacts" onClose={onClose}>
+      <Field label="Files (PKL / Joblib / ONNX / JSON, max 50 MB each — multi-select supported)">
         <input
           ref={inputRef}
           type="file"
+          multiple
           accept=".pkl,.pickle,.joblib,.onnx,.json"
           onChange={(e) => {
-            const f = e.target.files?.[0] || null
-            setFile(f)
-            if (f && !name) setName(f.name.split('.').slice(0, -1).join('.') || f.name)
+            addFiles(e.target.files)
+            // reset so re-picking the same file works
+            if (inputRef.current) inputRef.current.value = ''
           }}
           className="hidden"
         />
         <button
           onClick={() => inputRef.current?.click()}
-          className="w-full rounded-lg py-6 text-sm transition-colors"
+          className="w-full rounded-lg py-5 text-sm transition-colors"
           style={{
             background: 'var(--bg-elevated)',
-            border: `1.5px dashed ${file ? 'var(--accent)' : 'var(--border)'}`,
-            color: file ? 'var(--accent)' : 'var(--text-muted)',
+            border: `1.5px dashed ${files.length > 0 ? 'var(--accent)' : 'var(--border)'}`,
+            color: files.length > 0 ? 'var(--accent)' : 'var(--text-muted)',
           }}
         >
-          {file ? (
+          {files.length > 0 ? (
             <div>
-              <div className="font-semibold">{file.name}</div>
+              <div className="font-semibold">
+                {files.length} file{files.length === 1 ? '' : 's'} selected · {(totalBytes / 1024).toFixed(1)} KB total
+              </div>
               <div className="text-[11px] mt-0.5" style={{ color: 'var(--text-muted)' }}>
-                {(file.size / 1024).toFixed(1)} KB · click to change
+                Click to add more
               </div>
             </div>
           ) : (
             <>
               <Upload size={20} style={{ display: 'inline-block', marginRight: 6 }} />
-              Click to choose a model file
+              Click to choose model files (you can pick multiple)
             </>
           )}
         </button>
       </Field>
 
-      <div className="grid grid-cols-2 gap-3">
-        <Field label="Model name">
-          <input className="input" value={name} onChange={(e) => setName(e.target.value)} />
-        </Field>
-        <Field label="Description (optional)">
-          <input className="input" value={description} onChange={(e) => setDescription(e.target.value)} />
-        </Field>
-      </div>
+      {files.length > 0 && (
+        <div
+          className="rounded-lg overflow-hidden"
+          style={{ border: '1px solid var(--border)' }}
+        >
+          {files.map((f, i) => {
+            const stem = f.name.split('.').slice(0, -1).join('.') || f.name
+            return (
+              <div
+                key={`${f.name}-${i}`}
+                className="flex items-center gap-2 px-3 py-2"
+                style={{
+                  background: i % 2 === 0 ? 'var(--bg-card)' : 'var(--bg-elevated)',
+                  borderBottom: i < files.length - 1 ? '1px solid var(--border-subtle)' : 'none',
+                }}
+              >
+                <FileBox size={13} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
+                <div
+                  className="text-[12px] font-mono truncate min-w-0 flex-1"
+                  style={{ color: 'var(--text-secondary)' }}
+                  title={f.name}
+                >
+                  {f.name}
+                </div>
+                <input
+                  className="input"
+                  style={{ width: 200, padding: '4px 8px', fontSize: 12 }}
+                  placeholder={stem}
+                  value={names[i] ?? ''}
+                  onChange={(e) => setNameAt(i, e.target.value)}
+                  title="Override the model name (defaults to filename stem)"
+                  disabled={saving}
+                />
+                <span
+                  className="text-[10px] font-mono shrink-0"
+                  style={{ color: 'var(--text-muted)', width: 60, textAlign: 'right' }}
+                >
+                  {(f.size / 1024).toFixed(1)} KB
+                </span>
+                <button
+                  onClick={() => removeAt(i)}
+                  disabled={saving}
+                  className="p-1 rounded shrink-0"
+                  style={{ color: 'var(--text-muted)' }}
+                  title="Remove from list"
+                >
+                  <X size={12} />
+                </button>
+              </div>
+            )
+          })}
+        </div>
+      )}
 
-      {error && (
+      <Field label="Description (optional — applied to all uploaded models)">
+        <input
+          className="input"
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+          disabled={saving}
+        />
+      </Field>
+
+      {progress && (
+        <div
+          className="rounded-md px-3 py-2 text-xs flex items-center gap-2"
+          style={{
+            background: 'var(--accent-light)',
+            color: 'var(--accent)',
+          }}
+        >
+          <span style={{ fontWeight: 600 }}>
+            {saving ? 'Uploading…' : 'Done'}
+          </span>
+          <span className="font-mono">
+            {progress.done} / {progress.total}
+          </span>
+          <div
+            className="flex-1 h-1.5 rounded-full"
+            style={{ background: 'var(--bg-elevated)' }}
+          >
+            <div
+              className="h-full rounded-full transition-all"
+              style={{
+                width: `${(progress.done / progress.total) * 100}%`,
+                background: 'var(--accent)',
+              }}
+            />
+          </div>
+        </div>
+      )}
+
+      {errors.length > 0 && (
         <div className="text-xs px-3 py-2 rounded-md" style={{ background: 'var(--error-bg)', color: 'var(--error)' }}>
-          {error}
+          <div className="font-semibold mb-1">{errors.length} upload{errors.length === 1 ? '' : 's'} failed:</div>
+          <ul className="space-y-0.5 font-mono">
+            {errors.map((e, i) => (
+              <li key={i}>· <strong>{e.file}</strong> — {e.message}</li>
+            ))}
+          </ul>
         </div>
       )}
 
       <ModalFooter
         onClose={onClose}
         onSubmit={submit}
-        disabled={!file || saving}
-        submitLabel={saving ? 'Uploading…' : 'Register Model'}
+        disabled={files.length === 0 || saving}
+        submitLabel={
+          saving
+            ? `Uploading ${progress?.done ?? 0}/${progress?.total ?? files.length}…`
+            : `Register ${files.length || 'Models'}${files.length > 0 ? ` Model${files.length === 1 ? '' : 's'}` : ''}`
+        }
       />
     </Modal>
   )

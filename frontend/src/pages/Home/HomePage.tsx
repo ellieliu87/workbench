@@ -142,18 +142,11 @@ export default function HomePage() {
                     {f.name}
                   </div>
                   <p
-                    className="text-xs mb-3"
+                    className="text-xs"
                     style={{ color: 'var(--text-secondary)', lineHeight: 1.55 }}
                   >
                     {f.description}
                   </p>
-                  <div className="flex flex-wrap gap-1">
-                    {f.sample_metrics.slice(0, 4).map((m) => (
-                      <span key={m} className="pill" style={{ fontSize: 10 }}>
-                        {m}
-                      </span>
-                    ))}
-                  </div>
                 </button>
               )
             })}

@@ -1,6 +1,23 @@
 """CMA Workbench - Capital Markets & Analytics self-service platform - FastAPI backend."""
+# Load backend/.env into the process environment BEFORE any other imports so
+# that downstream modules (cof.orchestrator, etc.) see OPENAI_API_KEY at import time.
+from pathlib import Path
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parent / ".env")
+except ImportError:
+    pass
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
+# ── Domain-pack discovery ──────────────────────────────────────────────────
+# Each `packs/<id>/pack.py` registers its skills, tools, datasets, and model
+# attachments via the PackContext API. Run discovery BEFORE importing any
+# router so the routers' module-level seeds can pull pack-registered tools
+# from the registry.
+import packs as _packs
+_packs.discover_and_register()
 
 from routers import (
     auth,
@@ -14,6 +31,8 @@ from routers import (
     tools,
     models_registry,
     scenarios,
+    playbooks,
+    analytics_defs,
 )
 
 app = FastAPI(
@@ -43,9 +62,26 @@ app.include_router(datasources.router, prefix="/api/datasources", tags=["Data So
 app.include_router(datasets.router, prefix="/api/datasets", tags=["Datasets"])
 app.include_router(models_registry.router, prefix="/api/models", tags=["Models"])
 app.include_router(scenarios.router, prefix="/api/analytics", tags=["Scenarios & Runs"])
+app.include_router(playbooks.router, prefix="/api/playbooks", tags=["Playbooks"])
 app.include_router(skills.router, prefix="/api/skills", tags=["Agent Skills"])
 app.include_router(plots.router, prefix="/api/plots", tags=["Plot Builder"])
 app.include_router(tools.router, prefix="/api/tools", tags=["Python Tools"])
+app.include_router(analytics_defs.router, prefix="/api/analytics_defs", tags=["Analytics Definitions"])
+
+
+@app.on_event("startup")
+async def _ingest_pack_assets():
+    """After all routers and registries are wired, pull dataset and model
+    attachments from each registered pack into the dataset/model stores.
+    Tools are ingested lazily inside `routers/tools.py:_seed()`."""
+    try:
+        datasets._ingest_pack_datasets()
+    except Exception as e:
+        print(f"[startup] dataset pack ingest failed: {e}")
+    try:
+        models_registry._ingest_pack_models()
+    except Exception as e:
+        print(f"[startup] model pack ingest failed: {e}")
 
 
 @app.get("/health")

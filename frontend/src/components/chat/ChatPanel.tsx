@@ -1,10 +1,25 @@
 import { useEffect, useRef, useState } from 'react'
-import { Send, Sparkles, X } from 'lucide-react'
+import {
+  Send, Sparkles, X, Cpu, LineChart, ShieldCheck, Boxes, GitBranch,
+  AlertTriangle, SlidersHorizontal, LifeBuoy, Filter,
+} from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useChatStore } from '@/store/chatStore'
 import api from '@/lib/api'
 import { cn } from '@/lib/utils'
+import type { ChatAction } from '@/types'
+
+const AGENT_ICON: Record<string, any> = {
+  cpu: Cpu,
+  'line-chart': LineChart,
+  'shield-check': ShieldCheck,
+  boxes: Boxes,
+  'git-branch': GitBranch,
+  'alert-triangle': AlertTriangle,
+  'sliders-horizontal': SlidersHorizontal,
+  'life-buoy': LifeBuoy,
+}
 
 interface ChatPanelProps {
   open: boolean
@@ -112,6 +127,10 @@ export default function ChatPanel({ open, onClose }: ChatPanelProps) {
   const isLoading = useChatStore((s) => s.isLoading)
   const pageContext = useChatStore((s) => s.pageContext)
   const functionId = useChatStore((s) => s.functionId)
+  const tab = useChatStore((s) => s.tab)
+  const entityKind = useChatStore((s) => s.entityKind)
+  const entityId = useChatStore((s) => s.entityId)
+  const payload = useChatStore((s) => s.payload)
   const addMessage = useChatStore((s) => s.addMessage)
   const setLoading = useChatStore((s) => s.setLoading)
 
@@ -155,29 +174,81 @@ export default function ChatPanel({ open, onClose }: ChatPanelProps) {
 
   const sendMessage = async (content: string) => {
     if (!content.trim()) return
+    // Read the latest store snapshot at SEND time, not at the time the closure
+    // was captured. Without this, the cma-chat event listener fires with stale
+    // entity context from the previous render.
+    const snap = useChatStore.getState()
     addMessage({ role: 'user', content, timestamp: new Date().toISOString() })
     setInput('')
     setLoading(true)
     try {
-      const ctxBundle = pageContext ? `[Context: ${pageContext}]\n\n${content}` : content
+      const ctxBundle = snap.pageContext ? `[Context: ${snap.pageContext}]\n\n${content}` : content
       const res = await api.post('/api/chat/message', {
         message: ctxBundle,
-        function_id: functionId,
+        function_id: snap.functionId,
         agent_id: 'orchestrator',
+        tab: snap.tab,
+        entity_kind: snap.entityKind,
+        entity_id: snap.entityId,
+        payload: snap.payload,
       })
       addMessage({
         role: 'assistant',
         content: res.data.response || JSON.stringify(res.data),
         timestamp: new Date().toISOString(),
+        agent_id: res.data.agent_id,
+        agent_name: res.data.agent_name,
+        agent_color: res.data.agent_color,
+        agent_icon: res.data.agent_icon,
+        actions: res.data.actions || [],
       })
-    } catch {
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail
+      const status = err?.response?.status
+      const detailStr = typeof detail === 'string'
+        ? detail
+        : detail
+          ? JSON.stringify(detail)
+          : (err?.message || 'unknown error')
       addMessage({
         role: 'assistant',
-        content: 'Sorry — I could not reach the agent. Please try again.',
+        content:
+          `**Sorry — the agent call failed.**\n\n` +
+          (status ? `\`HTTP ${status}\`\n\n` : '') +
+          '```\n' + detailStr + '\n```',
         timestamp: new Date().toISOString(),
       })
     } finally {
       setLoading(false)
+    }
+  }
+
+  const runAction = async (action: ChatAction) => {
+    if (action.kind === 'apply_filter' && action.target && action.payload) {
+      try {
+        await api.post(`/api/plots/${action.target}/filters`, { append: action.payload })
+        // Tell the world the tile changed so previews refresh
+        window.dispatchEvent(new CustomEvent('cma-tile-updated', { detail: { plot_id: action.target } }))
+        addMessage({
+          role: 'assistant',
+          content: `✓ Applied filter: \`${action.payload.field} ${action.payload.op} ${action.payload.value}\` to tile.`,
+          timestamp: new Date().toISOString(),
+          agent_id: 'tile_tuner',
+          agent_name: 'Tile Tuner',
+          agent_color: '#0F766E',
+          agent_icon: 'sliders-horizontal',
+        })
+      } catch (e: any) {
+        addMessage({
+          role: 'assistant',
+          content: `Could not apply filter: ${e?.response?.data?.detail || e.message}`,
+          timestamp: new Date().toISOString(),
+        })
+      }
+    } else if (action.kind === 'run_validation') {
+      sendMessage('Validate the workflow.')
+    } else if (action.kind === 'troubleshoot') {
+      sendMessage('Help me troubleshoot this.')
     }
   }
 
@@ -214,11 +285,18 @@ export default function ChatPanel({ open, onClose }: ChatPanelProps) {
           onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = 'transparent')}
         />
 
-        {/* Header */}
+        {/* Header — reflects the most recent responding agent */}
+        {(() => {
+          const latest = [...messages].reverse().find((m) => m.role === 'assistant')
+          const agentName = latest?.agent_name || 'CMA Agent'
+          const agentColor = latest?.agent_color || 'var(--accent)'
+          const HeaderIcon = (latest?.agent_icon && AGENT_ICON[latest.agent_icon]) || Sparkles
+          const subline = latest?.agent_id || (functionId ? functionId.replace(/_/g, ' ') : 'self-serve')
+          return (
         <div
           className="flex items-center justify-between px-5 py-4"
           style={{
-            background: 'linear-gradient(135deg, var(--accent), var(--teal))',
+            background: `linear-gradient(135deg, ${agentColor}, color-mix(in srgb, ${agentColor} 70%, var(--teal)))`,
             borderBottom: '1px solid var(--border)',
           }}
         >
@@ -227,17 +305,17 @@ export default function ChatPanel({ open, onClose }: ChatPanelProps) {
               className="w-8 h-8 rounded-xl flex items-center justify-center"
               style={{ background: 'rgba(255,255,255,0.20)' }}
             >
-              <Sparkles size={14} color="#fff" />
+              <HeaderIcon size={14} color="#fff" />
             </div>
             <div>
               <div className="font-display text-sm font-semibold" style={{ color: '#fff' }}>
-                CMA Agent
+                {agentName}
               </div>
               <div
                 className="font-mono"
                 style={{ fontSize: 10, color: 'rgba(255,255,255,0.75)' }}
               >
-                {functionId ? functionId.replace(/_/g, ' ') : 'self-serve'} · auto-routing
+                {tab ? `${tab} · ` : ''}{subline}
               </div>
             </div>
           </div>
@@ -259,6 +337,8 @@ export default function ChatPanel({ open, onClose }: ChatPanelProps) {
             <X size={15} />
           </button>
         </div>
+          )
+        })()}
 
         {pageContext && (
           <div
@@ -338,19 +418,65 @@ export default function ChatPanel({ open, onClose }: ChatPanelProps) {
                   }
                 >
                   {msg.role === 'assistant' ? (
-                    <div
-                      className="max-w-none"
-                      style={{
-                        fontSize: 12,
-                        lineHeight: 1.6,
-                        fontFamily: "'Instrument Sans', -apple-system, sans-serif",
-                        color: 'var(--text-secondary)',
-                      }}
-                    >
-                      <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
-                        {msg.content}
-                      </ReactMarkdown>
-                    </div>
+                    <>
+                      {msg.agent_name && msg.agent_color && (
+                        <div
+                          className="flex items-center gap-1.5 mb-1.5 pb-1"
+                          style={{
+                            borderBottom: '1px solid var(--border-subtle)',
+                          }}
+                        >
+                          {(() => {
+                            const I = (msg.agent_icon && AGENT_ICON[msg.agent_icon]) || Sparkles
+                            return (
+                              <I size={10} style={{ color: msg.agent_color }} />
+                            )
+                          })()}
+                          <span
+                            style={{
+                              fontSize: 10, fontWeight: 700, letterSpacing: '0.04em',
+                              textTransform: 'uppercase', color: msg.agent_color,
+                            }}
+                          >
+                            {msg.agent_name}
+                          </span>
+                        </div>
+                      )}
+                      <div
+                        className="max-w-none"
+                        style={{
+                          fontSize: 12,
+                          lineHeight: 1.6,
+                          fontFamily: "'Instrument Sans', -apple-system, sans-serif",
+                          color: 'var(--text-secondary)',
+                        }}
+                      >
+                        <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
+                          {msg.content}
+                        </ReactMarkdown>
+                      </div>
+                      {msg.actions && msg.actions.length > 0 && (
+                        <div className="flex flex-wrap gap-1.5 mt-2 pt-2" style={{ borderTop: '1px solid var(--border-subtle)' }}>
+                          {msg.actions.map((a, i) => (
+                            <button
+                              key={i}
+                              onClick={() => runAction(a)}
+                              disabled={a.kind === 'noop'}
+                              className="text-[11px] px-2 py-1 rounded-md transition-colors flex items-center gap-1 disabled:opacity-50 disabled:cursor-default"
+                              style={{
+                                background: a.kind === 'apply_filter' ? 'rgba(15,118,110,0.10)' : 'var(--bg-card)',
+                                border: `1px solid ${a.kind === 'apply_filter' ? '#0F766E' : 'var(--border)'}`,
+                                color: a.kind === 'apply_filter' ? '#0F766E' : 'var(--text-secondary)',
+                                fontWeight: 600,
+                              }}
+                            >
+                              {a.kind === 'apply_filter' && <Filter size={10} />}
+                              {a.label}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </>
                   ) : (
                     <span style={{ fontSize: 13 }}>{msg.content}</span>
                   )}

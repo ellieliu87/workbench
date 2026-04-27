@@ -1,197 +1,316 @@
-"""Agent skills router - configure which capabilities the agent should expose.
+"""Agent Skills router — exposes built-in markdown skills + user uploads.
 
-A skill describes *what* the agent should do (system instructions + category +
-the names of tools it should rely on). The actual tool implementations live in
-the Python tool registry (see routers/tools.py). Skill.tools is a list of tool
-names that, in a real LLM setup, would be advertised to the model as callable.
+Listing: every `.md` in `agent/skills/` (built-in) and `agent/skills_user/`.
+A user file with the same `name` as a built-in overrides it.
+
+Upload: drop a `.md` file with the standard frontmatter; saved to
+`agent/skills_user/<safe_name>.md`. Takes effect immediately on the next chat
+call (the orchestrator reloads skills on demand).
+
+Delete: only user uploads can be deleted; built-ins are read-only.
 """
-import uuid
-from typing import Annotated
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from __future__ import annotations
 
-from models.schemas import AgentSkill, AgentSkillCreate, AgentSkillUpdate
-from routers.auth import get_current_user
+import re
+import uuid
+from pathlib import Path
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+
+from agent.skill_loader import (
+    USER_SKILLS_DIR,
+    BUILTIN_SKILLS_DIR,
+    AgentSkill,
+    list_skills,
+    load_all_skills,
+    _parse_frontmatter,
+)
+from models.schemas import AgentSkill as AgentSkillSchema, AgentSkillCreate, AgentSkillUpdate
+from packs import is_pack_visible
+from routers.auth import get_current_user, get_current_user_groups
 
 router = APIRouter()
 
 
-_SKILLS: dict[str, AgentSkill] = {}
+def _to_schema(s: AgentSkill) -> AgentSkillSchema:
+    """Adapt an AgentSkill (loader) into the wire-format schema."""
+    cat_map = {
+        "kpi-explainer": "data",
+        "data-quality": "data",
+        "model-explainer": "analytical",
+        "workflow-validator": "analytical",
+        "run-troubleshooter": "risk",
+        "tile-tuner": "analytical",
+        "troubleshooter": "risk",
+        "orchestrator": "custom",
+    }
+    return AgentSkillSchema(
+        id=s.name,
+        name=s.name,
+        description=s.description,
+        category=cat_map.get(s.name, "custom"),  # type: ignore[arg-type]
+        enabled=True,
+        instructions=s.system_prompt,
+        tools=s.tools,
+        source=s.source,  # type: ignore[arg-type]
+        pack_id=s.pack_id,
+    )
 
 
-SKILL_TEMPLATE = """# {{ skill_name }}
-
-## Goal
-Describe in one or two sentences what this skill accomplishes for the analyst.
-
-## When to use
-- Trigger phrase 1 (e.g. "explain how X is computed")
-- Trigger phrase 2
-- Trigger phrase 3
-
-## Inputs
-- Required: which page-context fields, KPIs, or pool/account IDs the agent needs.
-- Optional: any analyst-supplied modifiers (date range, scenario, segment).
-
-## Steps
-1. Look up the underlying source from the metadata tool.
-2. Pull the relevant rows / aggregates via `sql.query` or your custom tool.
-3. Compute / compare / explain.
-4. Return a markdown response with the answer and a short rationale.
-
-## Output format
-- Lead with the headline number or finding (bold, with units).
-- Follow with a small markdown table of the key drivers.
-- Close with a one-sentence interpretation.
-
-## Tools this skill uses
-- `tool_name_1` — what it does
-- `tool_name_2` — what it does
-
-## Guardrails
-- Never invent numbers — if a tool fails, say so.
-- Always cite the as-of date.
-- If the analyst's question is ambiguous, ask one clarifying question, then proceed.
-"""
+def _safe_filename(name: str) -> str:
+    norm = re.sub(r"[^a-zA-Z0-9_-]+", "_", name).strip("_")
+    return f"{norm or 'skill'}.md"
 
 
-def _seed():
-    if _SKILLS:
-        return
-    seeds = [
-        AgentSkill(
-            id="sk-explain-metric",
-            name="Explain Metric",
-            description="Walks through how a KPI is computed, including source tables, joins, and weighting.",
-            category="data",
-            enabled=True,
-            instructions="When asked 'how is X computed', respond with: source, formula, filters, as-of date.",
-            tools=["sql_query", "metadata_lookup"],
-        ),
-        AgentSkill(
-            id="sk-risk-monitor",
-            name="Risk Limit Monitor",
-            description="Compares current metrics to mandate limits and flags soft / hard breaches.",
-            category="risk",
-            enabled=True,
-            instructions="Compare every visible KPI to its mandate limit and surface breaches.",
-            tools=["limits_lookup", "alerting_send"],
-        ),
-        AgentSkill(
-            id="sk-alco-report",
-            name="ALCO Report",
-            description="Drafts a one-page ALCO-ready memo from the visible KPIs and insights.",
-            category="reporting",
-            enabled=True,
-            instructions="Use the formal ALCO template; lead with risk posture, then key metrics, then actions.",
-            tools=["html_render"],
-        ),
-        AgentSkill(
-            id="sk-rate-shock",
-            name="Rate Shock Scenario",
-            description="Runs parallel and twist shocks against the IRR and portfolio engines.",
-            category="analytical",
-            enabled=True,
-            instructions="Default shocks: -200, -100, +100, +200, +300 bps parallel, plus a steepener and flattener.",
-            tools=["scenario_parallel"],
-        ),
-        AgentSkill(
-            id="sk-sql",
-            name="Text-to-SQL",
-            description="Translates analyst questions into SQL against the active warehouse.",
-            category="data",
-            enabled=False,
-            instructions="Use Snowflake dialect by default; respect the analyst's role-based row filters.",
-            tools=["sql_query"],
-        ),
+def _is_user_skill(skill_name: str) -> bool:
+    path = USER_SKILLS_DIR / f"{skill_name.replace('-', '_')}.md"
+    return path.exists()
+
+
+# ── Routes ───────────────────────────────────────────────────────────────
+@router.get("", response_model=list[AgentSkillSchema])
+async def get_skills(groups: list[str] = Depends(get_current_user_groups)):
+    """List every skill the calling user is allowed to see.
+
+    Universal (built-in / user) skills are always returned. Pack-scoped
+    skills are filtered through `is_pack_visible(pack_id, groups)`."""
+    return [
+        _to_schema(s) for s in list_skills()
+        if is_pack_visible(s.pack_id, groups)
     ]
-    for s in seeds:
-        _SKILLS[s.id] = s
 
 
-_seed()
+@router.get("/_available_tools")
+async def get_available_tools(_: str = Depends(get_current_user)):
+    """Return the full catalog of tools a skill can declare.
 
+    Two sources are merged:
+      - **introspection** — tools exposed by `agent/tools.py` (get_workspace,
+        get_dataset_preview, validate_workflow, …). These are baked into the
+        agent runtime and always callable; the user can't add or remove them.
+      - **python** — user-registered Python tools from the Tools tab. Source
+        is either 'builtin' (sample) or 'user' (analyst-registered).
 
-def _render_template(skill_name: str) -> str:
-    return SKILL_TEMPLATE.replace("{{ skill_name }}", skill_name or "Untitled Skill")
+    The Skills editor needs both so it can show what's actually available
+    to a skill, not just the user-registered subset."""
+    # Lazy import to avoid pulling agent.tools at module load time.
+    from agent.tools import OPENAI_TOOLS
+    from routers.tools import _TOOLS as PYTHON_TOOLS
+
+    intro = []
+    for spec in OPENAI_TOOLS:
+        fn = spec.get("function", spec)
+        intro.append({
+            "name": fn.get("name"),
+            "description": fn.get("description", ""),
+            "kind": "introspection",
+            "source": "builtin",
+            "parameter_count": len((fn.get("parameters") or {}).get("properties", {})),
+            "enabled": True,
+        })
+
+    py = []
+    for t in PYTHON_TOOLS.values():
+        py.append({
+            "name": t.name,
+            "description": t.description,
+            "kind": "python",
+            "source": getattr(t, "source", "user"),
+            "parameter_count": len(t.parameters),
+            "enabled": t.enabled,
+        })
+
+    intro.sort(key=lambda x: x["name"])
+    py.sort(key=lambda x: (x["source"] != "user", x["name"]))
+    return intro + py
 
 
 @router.get("/template")
-async def get_template(name: str = "Untitled Skill", _: str = Depends(get_current_user)):
-    return {"template": _render_template(name)}
+async def get_template(name: str = "my-skill", _: str = Depends(get_current_user)):
+    """Return a skill markdown scaffold for analysts to start from."""
+    template = f"""---
+name: {name}
+description: One-sentence summary of what this skill does for the analyst.
+model: gpt-oss-120b
+max_tokens: 1024
+color: "#0891B2"
+icon: sparkles
+tools:
+  - get_workspace
+  - get_dataset_preview
+quick_queries:
+  - Brief me on this view
+  - Explain the highlighted card
+---
+
+# {name.replace('-', ' ').title()}
+
+Replace this body with your agent's system prompt.
+
+## When to use
+- Trigger phrase 1
+- Trigger phrase 2
+
+## Available tools
+- `get_workspace` — fetch the live Overview snapshot for the current function
+- `get_dataset_preview` — fetch a dataset's first N rows + dtypes
+- (See `backend/agent/tools.py` for the full list)
+
+## Output style
+- Lead with numbers; pull them via tools, never invent.
+- Use markdown headers and short bullets.
+- Bold key metrics; prefix warnings with **⚠**.
+- Keep responses under 200 words unless a table is needed.
+
+## Guardrails
+- If a tool errors, say so — don't fabricate.
+- If the question is ambiguous, ask one clarifying question, then proceed.
+"""
+    return {"template": template}
 
 
-@router.get("", response_model=list[AgentSkill])
-async def list_skills(_: str = Depends(get_current_user)):
-    return list(_SKILLS.values())
-
-
-@router.get("/{skill_id}", response_model=AgentSkill)
-async def get_skill(skill_id: str, _: str = Depends(get_current_user)):
-    s = _SKILLS.get(skill_id)
-    if not s:
-        raise HTTPException(status_code=404, detail="Skill not found")
-    return s
-
-
-@router.post("", response_model=AgentSkill, status_code=201)
-async def create_skill(req: AgentSkillCreate, _: str = Depends(get_current_user)):
-    sid = f"sk-{uuid.uuid4().hex[:8]}"
-    sk = AgentSkill(
-        id=sid,
-        name=req.name,
-        description=req.description,
-        category=req.category,
-        enabled=True,
-        instructions=req.instructions or _render_template(req.name),
-        tools=req.tools,
-    )
-    _SKILLS[sid] = sk
-    return sk
-
-
-@router.patch("/{skill_id}", response_model=AgentSkill)
-async def update_skill(skill_id: str, req: AgentSkillUpdate, _: str = Depends(get_current_user)):
-    sk = _SKILLS.get(skill_id)
-    if not sk:
-        raise HTTPException(status_code=404, detail="Skill not found")
-    update = req.model_dump(exclude_unset=True)
-    for k, v in update.items():
-        setattr(sk, k, v)
-    return sk
-
-
-@router.patch("/{skill_id}/toggle", response_model=AgentSkill)
-async def toggle_skill(skill_id: str, _: str = Depends(get_current_user)):
-    sk = _SKILLS.get(skill_id)
-    if not sk:
-        raise HTTPException(status_code=404, detail="Skill not found")
-    sk.enabled = not sk.enabled
-    return sk
-
-
-@router.delete("/{skill_id}", status_code=204)
-async def delete_skill(skill_id: str, _: str = Depends(get_current_user)):
-    if skill_id not in _SKILLS:
-        raise HTTPException(status_code=404, detail="Skill not found")
-    del _SKILLS[skill_id]
-
-
-@router.post("/upload", response_model=AgentSkill, status_code=201)
+@router.post("/upload", response_model=AgentSkillSchema, status_code=201)
 async def upload_skill(
     file: Annotated[UploadFile, File()],
     _: str = Depends(get_current_user),
 ):
+    """Upload a `.md` skill file. Overrides any built-in with the same `name`."""
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Filename required")
+    if not file.filename.lower().endswith(".md"):
+        raise HTTPException(status_code=400, detail="Skill files must be .md")
+
     contents = await file.read()
-    sid = f"sk-upload-{uuid.uuid4().hex[:6]}"
-    name = (file.filename or "Custom Skill").rsplit(".", 1)[0]
-    sk = AgentSkill(
-        id=sid,
-        name=name,
-        description=f"Uploaded skill manifest ({len(contents):,} bytes).",
-        category="custom",
-        enabled=False,
-        instructions=contents.decode("utf-8", errors="replace")[:8000],
-        tools=[],
-    )
-    _SKILLS[sid] = sk
-    return sk
+    text = contents.decode("utf-8", errors="replace")
+    meta, _body = _parse_frontmatter(text)
+    skill_name = meta.get("name", file.filename.rsplit(".", 1)[0])
+
+    USER_SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = USER_SKILLS_DIR / _safe_filename(skill_name)
+    out_path.write_text(text, encoding="utf-8")
+
+    # Reload and return the now-active skill (which may be either user or builtin override)
+    skills = load_all_skills()
+    norm = skill_name.replace("-", "_").lower()
+    s = skills.get(norm)
+    if not s:
+        raise HTTPException(status_code=400, detail="Skill saved but failed to load — check frontmatter syntax")
+
+    # Hot-reload the orchestrator's view of skills
+    try:
+        from routers.chat import _ORCH
+        _ORCH._reload_skills()  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
+    return _to_schema(s)
+
+
+@router.post("", response_model=AgentSkillSchema, status_code=201)
+async def create_skill(req: AgentSkillCreate, _: str = Depends(get_current_user)):
+    """Compose a new skill from form fields (turns into a markdown file under skills_user/)."""
+    skill_name = req.name.lower().replace(" ", "-")
+    body = req.instructions or f"# {req.name}\n\nDescribe how this agent should behave."
+    md = f"""---
+name: {skill_name}
+description: {req.description}
+model: gpt-oss-120b
+max_tokens: 1024
+icon: sparkles
+tools:
+{chr(10).join(f'  - {t}' for t in req.tools) if req.tools else '  - get_workspace'}
+---
+
+{body}
+"""
+    USER_SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = USER_SKILLS_DIR / _safe_filename(skill_name)
+    out_path.write_text(md, encoding="utf-8")
+
+    skills = load_all_skills()
+    s = skills.get(skill_name.replace("-", "_"))
+    if not s:
+        raise HTTPException(status_code=400, detail="Skill failed to load after save")
+
+    try:
+        from routers.chat import _ORCH
+        _ORCH._reload_skills()  # type: ignore[attr-defined]
+    except Exception:
+        pass
+    return _to_schema(s)
+
+
+@router.patch("/{skill_id}", response_model=AgentSkillSchema)
+async def update_skill(skill_id: str, req: AgentSkillUpdate, _: str = Depends(get_current_user)):
+    """Edit a skill — saves a user-override file even when the source was a built-in.
+
+    This means the analyst's edits never lose the built-in version: deleting the
+    user file via DELETE restores the built-in.
+    """
+    skills = load_all_skills()
+    s = skills.get(skill_id.replace("-", "_").lower())
+    if not s:
+        raise HTTPException(status_code=404, detail="Skill not found")
+
+    new_name = req.name or s.name
+    new_desc = req.description or s.description
+    new_instructions = req.instructions or s.system_prompt
+    new_tools = req.tools if req.tools is not None else s.tools
+    md = f"""---
+name: {new_name.lower().replace(' ', '-')}
+description: {new_desc}
+model: {s.model}
+max_tokens: {s.max_tokens}
+{f'color: "{s.color}"' if s.color else ''}
+{f'icon: {s.icon}' if s.icon else ''}
+tools:
+{chr(10).join(f'  - {t}' for t in new_tools) if new_tools else '  - get_workspace'}
+---
+
+{new_instructions}
+"""
+    USER_SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = USER_SKILLS_DIR / _safe_filename(new_name)
+    out_path.write_text(md, encoding="utf-8")
+
+    skills = load_all_skills()
+    s2 = skills.get(new_name.replace("-", "_").lower())
+    try:
+        from routers.chat import _ORCH
+        _ORCH._reload_skills()  # type: ignore[attr-defined]
+    except Exception:
+        pass
+    return _to_schema(s2 or s)
+
+
+@router.delete("/{skill_id}", status_code=204)
+async def delete_skill(skill_id: str, _: str = Depends(get_current_user)):
+    """Delete a user override. Built-in skills cannot be deleted."""
+    norm = skill_id.replace("-", "_").lower()
+    user_path = USER_SKILLS_DIR / f"{norm}.md"
+    if user_path.exists():
+        user_path.unlink()
+        try:
+            from routers.chat import _ORCH
+            _ORCH._reload_skills()  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        return
+    builtin_path = BUILTIN_SKILLS_DIR / f"{norm}.md"
+    if builtin_path.exists():
+        raise HTTPException(
+            status_code=400,
+            detail="Built-in skills are read-only. Edit it to create a user override that hides the built-in, or upload a custom version.",
+        )
+    raise HTTPException(status_code=404, detail="Skill not found")
+
+
+@router.patch("/{skill_id}/toggle", response_model=AgentSkillSchema)
+async def toggle_skill(skill_id: str, _: str = Depends(get_current_user)):
+    """Toggle is a no-op now — every loaded skill is enabled. Returned for API compatibility."""
+    skills = load_all_skills()
+    s = skills.get(skill_id.replace("-", "_").lower())
+    if not s:
+        raise HTTPException(status_code=404, detail="Skill not found")
+    return _to_schema(s)

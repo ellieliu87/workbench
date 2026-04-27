@@ -30,7 +30,8 @@ from models.schemas import (
     RegressionRequest,
     TrainedModel,
 )
-from routers.auth import get_current_user
+from packs import is_pack_visible
+from routers.auth import get_current_user, get_current_user_groups
 from routers.datasets import _DATASETS, _read_dataframe, _resolve_path
 
 router = APIRouter()
@@ -41,6 +42,60 @@ MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 SUPPORTED_MODEL_FORMATS = {"pkl", "pickle", "joblib", "onnx", "json"}
 
 _MODELS: dict[str, TrainedModel] = {}
+
+
+# ── pack-registered seed ingest ────────────────────────────────────────────
+def _ingest_pack_models() -> None:
+    """Pull model attachments registered by domain packs into `_MODELS`.
+
+    Called once at startup after `packs.discover_and_register()`. Idempotent."""
+    from packs import model_attachments
+
+    try:
+        from agent.model_introspect import introspect_artifact
+    except Exception:
+        introspect_artifact = None  # type: ignore[assignment]
+
+    now = datetime.utcnow().isoformat() + "Z"
+    for s in model_attachments():
+        if s["model_id"] in _MODELS:
+            continue
+        try:
+            src: Path = s["source_path"]
+            if not src.exists():
+                continue
+            ext = src.suffix.lstrip(".")
+            func_dir = ARTIFACT_ROOT / s["function_id"]
+            func_dir.mkdir(parents=True, exist_ok=True)
+            rel = f"{s['function_id']}/{s['model_id']}.{ext}"
+            dest = ARTIFACT_ROOT / rel
+            if not dest.exists():
+                dest.write_bytes(src.read_bytes())
+            introspection = None
+            if introspect_artifact is not None:
+                try:
+                    introspection = introspect_artifact(dest, ext)
+                except Exception:
+                    introspection = None
+            m = TrainedModel(
+                id=s["model_id"],
+                function_id=s["function_id"],
+                name=s["name"],
+                description=s["description"],
+                source_kind="upload",
+                model_type="uploaded",
+                artifact_path=rel,
+                file_format=ext,
+                size_bytes=dest.stat().st_size,
+                introspection=introspection,
+                train_metrics=s.get("train_metrics", {}) or {},
+                monitoring_metrics=_seed_monitoring("uploaded", 0.92),
+                created_at=now,
+                pack_id=s.get("pack_id"),
+            )
+            _MODELS[m.id] = m
+        except Exception:
+            continue
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
@@ -169,13 +224,17 @@ def _train_regression(
     }
 
 
+# Seed bundled sample models (no-op if registry already has entries).
+# Pack-registered models are ingested by the startup hook in main.py.
+
+
 # ── routes ─────────────────────────────────────────────────────────────────
 @router.get("", response_model=list[TrainedModel])
 async def list_models(
     function_id: str | None = Query(default=None),
-    _: str = Depends(get_current_user),
+    groups: list[str] = Depends(get_current_user_groups),
 ):
-    items = list(_MODELS.values())
+    items = [m for m in _MODELS.values() if is_pack_visible(m.pack_id, groups)]
     if function_id:
         items = [m for m in items if m.function_id == function_id]
     items.sort(key=lambda m: m.created_at, reverse=True)
@@ -254,7 +313,12 @@ async def upload_model(
     func_dir = ARTIFACT_ROOT / function_id
     func_dir.mkdir(parents=True, exist_ok=True)
     rel = f"{function_id}/{mid}.{ext}"
-    (ARTIFACT_ROOT / rel).write_bytes(contents)
+    abs_path = ARTIFACT_ROOT / rel
+    abs_path.write_bytes(contents)
+
+    # Best-effort introspection of the uploaded artifact
+    from agent.model_introspect import introspect_artifact
+    introspection = introspect_artifact(abs_path, ext)
 
     now = datetime.utcnow().isoformat() + "Z"
     m = TrainedModel(
@@ -267,11 +331,32 @@ async def upload_model(
         artifact_path=rel,
         file_format=ext,
         size_bytes=len(contents),
+        introspection=introspection,
         train_metrics={"uploaded": 1.0, "size_bytes": float(len(contents))},
         monitoring_metrics=_seed_monitoring("uploaded", 0.85),
         created_at=now,
     )
     _MODELS[mid] = m
+    return m
+
+
+@router.post("/{model_id}/reintrospect", response_model=TrainedModel)
+async def reintrospect_model(model_id: str, _: str = Depends(get_current_user)):
+    """Re-run introspection on a previously uploaded artifact.
+
+    Useful if you've added the model's class definitions to the Python path
+    after upload, or if you've re-uploaded the file to disk manually.
+    """
+    m = _MODELS.get(model_id)
+    if not m:
+        raise HTTPException(status_code=404, detail="Model not found")
+    if m.source_kind != "upload" or not m.artifact_path or not m.file_format:
+        raise HTTPException(status_code=400, detail="Only uploaded artifacts can be re-introspected")
+    abs_path = ARTIFACT_ROOT / m.artifact_path
+    if not abs_path.exists():
+        raise HTTPException(status_code=404, detail="Artifact file is missing on disk")
+    from agent.model_introspect import introspect_artifact
+    m.introspection = introspect_artifact(abs_path, m.file_format)
     return m
 
 

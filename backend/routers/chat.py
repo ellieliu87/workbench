@@ -1,244 +1,185 @@
-"""Chat router - function-aware mock agent that returns markdown insights.
+"""Chat router — routes analyst queries to a real LLM-backed agent team.
 
-The architecture mirrors oasia: a list of agent personas, mock responses keyed
-by user-intent keywords, plus a per-function specialization layer so the same
-chat panel feels native inside each business function workspace.
+Connection priority:
+  1. `COF_BASE_URL` (+ optional `COF_API_KEY`) — Capital One company endpoint, no key in UI
+  2. `OPENAI_API_KEY` — direct OpenAI
+
+If neither is set, every chat call returns a clear setup-required message
+(NOT a mock). Set the env vars and restart the backend.
+
+The backend pre-routes via the page context the frontend ships with each
+message (tab + entity_kind + entity_id) so we usually go straight to the right
+specialist without invoking the orchestrator's delegate-tools loop. When the
+context isn't enough, we fall back to the orchestrator agent.
 """
-from datetime import date
+from __future__ import annotations
+
+import logging
+from typing import Any
+
 from fastapi import APIRouter, Depends
 
-from models.schemas import AgentInfo, ChatMessage, ChatResponse
+from agent.skill_loader import AgentSkill, list_skills
+from cof.orchestrator import AsyncOrchestrator
+from models.schemas import (
+    AgentInfo,
+    ChatAction,
+    ChatMessage,
+    ChatResponse,
+)
 from routers.auth import get_current_user
 
 router = APIRouter()
+log = logging.getLogger("cma.chat")
+
+# Single shared orchestrator instance (skills reload from disk on demand)
+_ORCH = AsyncOrchestrator()
 
 
-AGENTS: list[AgentInfo] = [
-    AgentInfo(
-        id="orchestrator",
-        name="CMA Orchestrator",
-        description="Routes queries to the right specialist agent and synthesizes results.",
-        icon="cpu",
-        color="#004977",
-    ),
-    AgentInfo(
-        id="data_explainer",
-        name="Data Explainer",
-        description="Explains where a metric came from and how it is computed.",
-        icon="database",
-        color="#0891B2",
-    ),
-    AgentInfo(
-        id="risk_monitor",
-        name="Risk Monitor",
-        description="Surfaces breaches, near-breaches, and concentration alerts.",
-        icon="shield-alert",
-        color="#DC2626",
-    ),
-    AgentInfo(
-        id="report_writer",
-        name="Report Writer",
-        description="Drafts ALCO-ready summaries and management reporting packages.",
-        icon="file-text",
-        color="#7C3AED",
-    ),
-    AgentInfo(
-        id="scenario_analyst",
-        name="Scenario Analyst",
-        description="Runs what-if rate, deposit beta, and credit stress scenarios.",
-        icon="flask",
-        color="#D97706",
-    ),
-    AgentInfo(
-        id="sql_assistant",
-        name="SQL Assistant",
-        description="Translates analyst questions into SQL against configured data sources.",
-        icon="code",
-        color="#059669",
-    ),
-]
+# ── Routing (frontend context → specialist agent_id) ─────────────────────
+def _route(req: ChatMessage) -> str:
+    msg = (req.message or "").lower()
+
+    if "error:" in msg or "traceback" in msg or "failed:" in msg:
+        return "troubleshooter"
+    if req.entity_kind == "kpi":
+        return "kpi-explainer"
+    if req.entity_kind == "dataset":
+        return "data-quality"
+    if req.entity_kind == "scenario":
+        return "macro-economist"
+    if req.entity_kind == "model":
+        return "model-explainer"
+    if req.entity_kind == "run":
+        return "run-troubleshooter" if ("fail" in msg or "error" in msg) else "model-explainer"
+    if req.entity_kind == "tile":
+        # Tune if the user explicitly asked for filter / sort / change work,
+        # otherwise default to the explainer (the Sparkles button on a tile).
+        if any(k in msg for k in ("tune", "filter", "sort", "limit", "change", "modify")):
+            return "tile-tuner"
+        return "tile-explainer"
+    if req.entity_kind == "workflow":
+        return "workflow-validator"
+    if req.tab == "data" and any(k in msg for k in ("quality", "anomal", "outlier", "null")):
+        return "data-quality"
+    if req.tab == "models" and "explain" in msg:
+        return "model-explainer"
+    if req.tab == "workflow":
+        if "valid" in msg or "check" in msg or "make sense" in msg:
+            return "workflow-validator"
+        if "trouble" in msg or "fail" in msg or "error" in msg:
+            return "run-troubleshooter"
+        return "workflow-validator"
+    if req.tab == "reporting":
+        # Default Reporting-tab chat (no specific tile picked) → tile explainer.
+        # Tune intent is handled above when entity_kind == 'tile'.
+        return "tile-explainer"
+    if req.tab == "analytics":
+        # New self-serve analytics tab — no dedicated specialist yet, so route
+        # to the orchestrator and let it pick or answer directly.
+        return "orchestrator"
+    return "orchestrator"
 
 
-# ── Function-specific deep dives ────────────────────────────────────────────
-_FUNCTION_BRIEFS: dict[str, str] = {
-    "investment_portfolio": """## Investment Portfolio — Snapshot
-
-**NAV**: $3.78B (+0.12% MoM)  •  **Book Yield**: 5.44%  •  **OAD**: 4.25 yr  •  **OAS**: 44 bps
-
-**Risk Flags**
-- EVE +200bp at -3.8% (mandate floor -5.0%, cushion 120 bps)
-- CC30 sector at 40.9% — approaching 45% concentration cap
-- Largest position FNMA_CC30_6.0_A at 16.1% of NAV
-
-**Today's Watchlist**
-- FNMA_CC30_6.5_G OAS widened 8 bps; cohort-relative cheap signal
-- 3 new pools from dealer desk (52-58 bps OAS) pending review""",
-    "interest_rate_risk": """## Interest Rate Risk — Snapshot
-
-**EVE +200bp**: -3.8%  •  **NII 12M**: $1.42B  •  **DV01**: $2.7MM  •  **Convexity**: -0.25
-
-**Shock Profile**
-| Shock | EVE % |
-|-------|-------|
-| -200  | +8.2% |
-| -100  | +4.1% |
-| +100  | -2.1% |
-| +200  | -3.8% (cushion 120 bps to limit) |
-| +300  | -6.2% (breach by 1.2 pp) |
-
-**Top KRD bucket**: 5Y at 1.10 yr — primary driver of EVE +200bp loss.""",
-    "liquidity_management": """## Liquidity & Funding — Snapshot
-
-**HQLA**: $24.6B  •  **LCR**: 136%  •  **NSFR**: 121%  •  **Deposit Beta**: 0.42
-
-**Deposit mix**: Retail Savings $82.4B (β 0.38) drives 47% of base funding. Brokered CD $12.1B carries the highest beta (0.94) but only 7% of mix.
-
-**Cash ladder**: net cumulative outflow gap closes by 90 days — funding profile is well-matched.""",
-    "credit_risk": """## Credit Risk — Snapshot
-
-**Charge-off Rate**: 4.21% (-17 bps)  •  **PD (12m)**: 2.84%  •  **LGD**: 68.4%  •  **Allowance**: $3.2B
-
-**Vintage signal**: 2024 vintage 90+dpd at 0.68% is the high watermark. Peak loss pull-forward expected in 2026 H2.
-
-**CECL walk**: $47MM build this quarter, driven by reserve for commercial CRE concentration.""",
-    "treasury": """## Treasury / FTP — Snapshot
-
-**FTP 5Y**: 4.61% (+8 bps)  •  **NIM**: 6.33% (-9 bps)  •  **Funding Cost**: 3.41%  •  **Surplus**: $8.4B
-
-**NIM walk**: asset yield repricing (+18 bps) was outweighed by funding cost (-31 bps) and a small positive mix shift (+4 bps).
-
-**Action**: review pricing on 5Y product offers given the belly-of-curve sell-off; consider lengthening duration in HQLA stack with surplus.""",
-    "capital_planning": """## Capital Planning — Snapshot
-
-**CET1**: 13.4% (+20 bps)  •  **Tier 1**: 14.6%  •  **RWA**: $232.5B (+$2.1B QoQ)  •  **SCB**: 2.5%
-
-**Stress posture**: severe-adverse trough is Q3 PPNR $0.62B; implies $4.8B post-stress capital build over the 9-quarter horizon.
-
-**Capital actions in flight**: $3.0B share buybacks; $1.2B dividends approved.""",
-    "market_risk": """## Market Risk — Snapshot
-
-**1d 99% VaR**: $31.3MM  •  **SVaR**: $55.8MM  •  **IRC**: $112MM  •  **Back-test exceptions**: 2 / 250d (green zone)
-
-**Top risk concentration**: MBS desk VaR $12.1MM — consider hedge rebalancing.
-
-**FRTB GIRR delta**: $21.3MM is the dominant FRTB sensitivity; rate shock vega is $4.8MM.""",
-    "financial_reporting": """## FP&A — Snapshot
-
-**Revenue**: $3.36B (+1.2% vs plan)  •  **OpEx**: $2.97B (+2.4% vs plan)  •  **PPNR**: $0.39B (-3.1% vs plan)  •  **YTD Variance**: +$48MM net favorable
-
-**Drivers**
-- Revenue beat by $40MM on stronger Card interchange and NII
-- Technology expense $60MM over plan from accelerated cloud migration
-- Commercial PPNR $4MM below plan due to CRE provision build""",
-}
+# ── Build context bundle for the LLM ─────────────────────────────────────
+def _build_context(req: ChatMessage) -> str:
+    parts: list[str] = []
+    if req.function_id:
+        parts.append(f"function_id: {req.function_id}")
+    if req.tab:
+        parts.append(f"tab: {req.tab}")
+    if req.entity_kind:
+        parts.append(f"entity_kind: {req.entity_kind}")
+    if req.entity_id:
+        parts.append(f"entity_id: {req.entity_id}")
+    if req.context:
+        parts.append(f"page_context: {req.context}")
+    if req.payload:
+        # Workflow validator passes nodes/edges in payload
+        import json
+        parts.append(f"payload: {json.dumps(req.payload, default=str)[:4000]}")
+    return "\n".join(parts)
 
 
-_FUNCTION_FOLLOWUPS: dict[str, str] = {
-    "investment_portfolio": "Try: 'Why did OAS tighten?', 'Show me cheap pools', 'Run +200bp shock'.",
-    "interest_rate_risk":   "Try: 'Explain the +300bp breach', 'Resize 7Y hedge', 'NII at +100bp'.",
-    "liquidity_management": "Try: 'Stress LCR under 30% deposit run-off', 'Decompose deposit beta'.",
-    "credit_risk":          "Try: 'CECL allowance walk', 'Forecast charge-offs by segment', 'Vintage detail'.",
-    "treasury":             "Try: 'NIM walk by segment', 'Reprice 5Y product', 'Where to deploy surplus'.",
-    "capital_planning":     "Try: 'Severe-adverse PPNR drivers', 'RWA optimization ideas', 'Action ladder'.",
-    "market_risk":          "Try: 'BT exception detail', 'FRTB curvature charge', 'Hedge MBS VaR'.",
-    "financial_reporting":  "Try: 'Walk me through segment variance', 'Forecast Q2 PPNR', 'Top expense overruns'.",
-}
+def _agent_meta(agent_id: str) -> tuple[str, str | None, str | None]:
+    """Return (display_name, color, icon) for the responding agent."""
+    skill = _ORCH.get_skill(agent_id)
+    if skill:
+        # If user uploaded their own version, show that name; otherwise use the skill's name
+        name = skill.name
+        return (name.replace("-", " ").title(), skill.color, skill.icon)
+    return (agent_id.replace("-", " ").title(), None, None)
 
 
-# ── Generic agent intents (work across all functions) ──────────────────────
-_INTENT_RESPONSES: dict[str, str] = {
-    "explain": """## Data Lineage
-
-The metric you're looking at is composed of:
-
-1. **Source**: pulled from the configured data source (default: `cma_warehouse.fact_*`)
-2. **Aggregation**: weighted by market value or balance, depending on the metric
-3. **As-of**: end-of-day snapshot from prior business day
-
-Open **Settings → Data Sources** to change the underlying connection or sync schedule.""",
-    "risk":   """## Risk Posture
-
-Across the function you are viewing, the agent is monitoring:
-- Hard mandate limits (EVE, OAD, concentration)
-- Soft warnings (sector caps, single-name exposure)
-- Trend breaches (3-period rolling drift past tolerance)
-
-No critical alerts at this time. The most-watched metric is in the snapshot above.""",
-    "report": """## Draft Report
-
-I can compose a one-page memo using the visible KPIs, top-line insights, and any
-flagged risks. Click **Export** in the top-right of the workspace to render this
-as HTML, or ask me to "tailor for ALCO" / "tailor for board".""",
-    "what if": """## Scenario Analysis
-
-Tell me which lever you want to flex:
-- Rates: parallel shocks, twists, key-rate moves
-- Credit: PD/LGD multipliers, vintage-level overlays
-- Liquidity: deposit run-off, asset haircut
-- FX: parallel currency moves
-
-I'll re-run the page metrics under the scenario and narrate the deltas.""",
-    "sql":    """## SQL Assistant
-
-Tell me what you want and I'll draft a query against your active data source.
-Example:
-```sql
-SELECT product_type, SUM(market_value) AS mv
-FROM cma_warehouse.positions
-WHERE as_of_date = CURRENT_DATE - 1
-GROUP BY product_type
-ORDER BY mv DESC;
-```
-Open **Settings → Data Sources** to switch which warehouse the query runs against.""",
-}
-
-
-def _generate_response(message: str, function_id: str | None) -> str:
-    msg = message.lower()
-
-    # Function-specific brief queries
-    if function_id and any(k in msg for k in ("brief", "snapshot", "summary", "morning")):
-        return _FUNCTION_BRIEFS.get(function_id, _FUNCTION_BRIEFS["investment_portfolio"])
-
-    # Generic intents
-    if "what if" in msg or "scenario" in msg or "shock" in msg:
-        return _INTENT_RESPONSES["what if"]
-    if "sql" in msg or "query" in msg or "select" in msg:
-        return _INTENT_RESPONSES["sql"]
-    if "report" in msg or "draft" in msg or "memo" in msg or "alco" in msg:
-        return _INTENT_RESPONSES["report"]
-    if "risk" in msg or "limit" in msg or "alert" in msg or "breach" in msg:
-        return _INTENT_RESPONSES["risk"]
-    if "explain" in msg or "where" in msg or "how is" in msg or "lineage" in msg:
-        return _INTENT_RESPONSES["explain"]
-
-    # Default: brief for the current function, plus suggestions
-    base = _FUNCTION_BRIEFS.get(function_id or "", "")
-    follow = _FUNCTION_FOLLOWUPS.get(function_id or "", "")
-    if base:
-        return f"{base}\n\n---\n_{follow}_"
-
-    return f"""## CMA Workbench Agent
-
-Hi! I'm a self-serve analytical assistant. Pick a business function from the home
-panel and I'll specialize. I can:
-
-- Explain underlying data and methodology behind any KPI or chart
-- Surface risk breaches and concentration alerts
-- Draft management reports (ALCO, board, regulator)
-- Run what-if scenarios on rates, credit, and liquidity
-- Translate plain-English questions into SQL against your data sources
-
-Today is {date.today().strftime("%B %d, %Y")}."""
-
-
+# ── Endpoints ─────────────────────────────────────────────────────────────
 @router.get("/agents", response_model=list[AgentInfo])
 async def list_agents(_: str = Depends(get_current_user)):
-    return AGENTS
+    """Return one AgentInfo per loaded skill — built-ins + user uploads."""
+    out: list[AgentInfo] = []
+    for s in list_skills():
+        out.append(AgentInfo(
+            id=s.name, name=s.name.replace("-", " ").title(),
+            description=s.description,
+            icon=s.icon or "sparkles",
+            color=s.color or "#004977",
+        ))
+    return out
 
 
 @router.post("/message", response_model=ChatResponse)
 async def send_message(req: ChatMessage, _: str = Depends(get_current_user)):
-    response = _generate_response(req.message, req.function_id)
-    agent_name = next((a.name for a in AGENTS if a.id == req.agent_id), "CMA Orchestrator")
-    return ChatResponse(response=response, agent_id=req.agent_id, agent_name=agent_name)
+    if not _ORCH.available:
+        return ChatResponse(
+            response=(
+                "## LLM not configured\n\n"
+                f"{_ORCH.init_error or 'Set COF_BASE_URL or OPENAI_API_KEY in backend/.env and restart.'}"
+            ),
+            agent_id="setup_required",
+            agent_name="Setup Required",
+            agent_color="#FF5C5C",
+            agent_icon="alert-triangle",
+        )
+
+    target = _route(req)
+    ctx = _build_context(req)
+
+    try:
+        if target == "orchestrator":
+            text = await _ORCH.chat_orchestrator(req.message, extra_context=ctx)
+        else:
+            text = await _ORCH.chat_specialist(target, req.message, extra_context=ctx)
+    except Exception as e:
+        log.error("Chat call failed: %s", e)
+        return ChatResponse(
+            response=f"## Agent error\n\n```\n{e}\n```\nCheck the backend log for the full traceback.",
+            agent_id="troubleshooter",
+            agent_name="Troubleshooter",
+            agent_color="#FF5C5C",
+            agent_icon="life-buoy",
+        )
+
+    name, color, icon = _agent_meta(target)
+
+    # The Tile Tuner emits action chips by calling apply_tile_filter — surface
+    # those as ChatAction items so the frontend renders clickable filter chips.
+    actions: list[ChatAction] = []
+    if target == "tile-tuner" and req.entity_id:
+        # Ask the agent's tool log for filters it just appended (we keep it simple
+        # by inspecting the tile's current filter list pre/post is overkill —
+        # the agent returns chip suggestions in markdown text and the analyst
+        # can also click the saved filters indicator on the tile).
+        pass  # filter actions are written via the tool itself; see tools.py:apply_tile_filter
+
+    return ChatResponse(
+        response=text,
+        agent_id=target,
+        agent_name=name,
+        agent_color=color,
+        agent_icon=icon,
+        actions=actions,
+    )
+
+
+# Re-export the validation helper (kept for backwards compatibility with the
+# scenarios.py /workflow-validate endpoint that imports from here).
+from routers.chat_validation import validate_workflow_payload as _validate_workflow_payload  # noqa: F401

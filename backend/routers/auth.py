@@ -12,13 +12,20 @@ _token_store: dict[str, dict] = {}
 
 MOCK_PASSWORD = "capital1"
 
-# Username -> default role/department mapping for demo
+# The single permitted user for this build. Username + password are required;
+# any other combination is rejected. Profile is what the UI badge shows.
+MOCK_USERNAME = "pqr557"
 _DEFAULT_PROFILES = {
-    "alice":  {"role": "Capital Markets Analyst",   "department": "Capital Markets"},
-    "bob":    {"role": "Treasury Analyst",          "department": "Finance"},
-    "carol":  {"role": "Senior Quant",              "department": "Capital Markets"},
-    "david":  {"role": "Risk Analyst",              "department": "Finance"},
-    "demo":   {"role": "Capital Markets Analyst",   "department": "Capital Markets"},
+    "pqr557": {
+        "role": "Quantitative Analyst",
+        "department": "Capital Markets & Analytics",
+        # `groups` controls which domain packs the user can see / use.
+        # The wildcard "*" grants access to every pack. When you onboard
+        # additional users, list specific group names (e.g.
+        # ["portfolio_managers", "treasury_desk"]) and have each pack
+        # declare matching `user_groups` in its `pack.py:register`.
+        "groups": ["*"],
+    },
 }
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=False)
@@ -36,28 +43,35 @@ def get_user_record(token: str = Depends(oauth2_scheme)) -> dict:
     return _token_store[token]
 
 
+def get_current_user_groups(token: str = Depends(oauth2_scheme)) -> list[str]:
+    """Return the calling user's group memberships. Used to filter pack-scoped
+    artifacts; an empty list (or "*") means "all groups"."""
+    if not token or token not in _token_store:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    return list(_token_store[token].get("groups", []))
+
+
 @router.post("/login", response_model=LoginResponse)
 async def login(request: LoginRequest):
     if not request.username:
         raise HTTPException(status_code=400, detail="Username required")
-    if request.password != MOCK_PASSWORD:
-        raise HTTPException(status_code=401, detail="Invalid credentials (hint: capital1)")
+    if request.username.lower() != MOCK_USERNAME or request.password != MOCK_PASSWORD:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    profile = _DEFAULT_PROFILES.get(request.username.lower(), {
-        "role": "Analyst",
-        "department": "Capital Markets",
-    })
+    profile = _DEFAULT_PROFILES[MOCK_USERNAME]
     token = str(uuid.uuid4())
     _token_store[token] = {
-        "username": request.username,
+        "username": MOCK_USERNAME,
         "role": profile["role"],
         "department": profile["department"],
+        "groups": list(profile.get("groups", [])),
     }
     return LoginResponse(
         token=token,
-        username=request.username,
+        username=MOCK_USERNAME,
         role=profile["role"],
         department=profile["department"],
+        groups=list(profile.get("groups", [])),
     )
 
 

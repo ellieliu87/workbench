@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import {
   ArrowLeft, MessageCircle, LayoutDashboard, Database, Boxes, FlaskConical, BarChart3,
+  ListChecks, FileBarChart,
 } from 'lucide-react'
 import api from '@/lib/api'
 import type { BusinessFunction } from '@/types'
@@ -12,13 +13,17 @@ import DataTab from './DataTab'
 import ModelsTab from './ModelsTab'
 import AnalyticsTab from './AnalyticsTab'
 import ReportsTab from './ReportsTab'
+import PlaybooksTab from './PlaybooksTab'
+import SelfServeAnalyticsTab from './SelfServeAnalyticsTab'
 
 const TABS = [
   { id: 'overview',  label: 'Overview',  icon: LayoutDashboard },
   { id: 'data',      label: 'Data',      icon: Database },
   { id: 'models',    label: 'Models',    icon: Boxes },
-  { id: 'analytics', label: 'Analytics', icon: FlaskConical },
-  { id: 'reports',   label: 'Reports',   icon: BarChart3 },
+  { id: 'workflow',  label: 'Workflow',  icon: FlaskConical },
+  { id: 'playbooks', label: 'Playbooks', icon: ListChecks },
+  { id: 'analytics', label: 'Analytics', icon: BarChart3 },
+  { id: 'reporting', label: 'Reporting', icon: FileBarChart },
 ] as const
 
 type TabId = (typeof TABS)[number]['id']
@@ -28,9 +33,17 @@ export default function WorkspacePage() {
   const navigate = useNavigate()
   const setOpen = useChatStore((s) => s.setOpen)
   const setPageContext = useChatStore((s) => s.setPageContext)
+  const setTab = useChatStore((s) => s.setTab)
+  const setEntity = useChatStore((s) => s.setEntity)
 
   const active: TabId = (TABS.find((t) => t.id === tab)?.id || 'overview') as TabId
   const [meta, setMeta] = useState<BusinessFunction | null>(null)
+
+  useEffect(() => {
+    setTab(active as any)
+    // Clear entity context whenever the tab changes
+    setEntity(null, null)
+  }, [active, setTab, setEntity])
 
   useEffect(() => {
     if (!functionId) return
@@ -133,7 +146,7 @@ export default function WorkspacePage() {
           onContextChange={setPageContext}
         />
       )}
-      {active === 'analytics' && (
+      {active === 'workflow' && (
         <AnalyticsTab
           functionId={functionId}
           functionName={meta?.name || functionId}
@@ -141,7 +154,23 @@ export default function WorkspacePage() {
           onContextChange={setPageContext}
         />
       )}
-      {active === 'reports' && (
+      {active === 'playbooks' && (
+        <PlaybooksTab
+          functionId={functionId}
+          functionName={meta?.name || functionId}
+          onAskAgent={askAgent}
+          onContextChange={setPageContext}
+        />
+      )}
+      {active === 'analytics' && (
+        <SelfServeAnalyticsTab
+          functionId={functionId}
+          functionName={meta?.name || functionId}
+          onAskAgent={askAgent}
+          onContextChange={setPageContext}
+        />
+      )}
+      {active === 'reporting' && (
         <ReportsTab
           functionId={functionId}
           functionName={meta?.name || functionId}

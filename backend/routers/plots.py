@@ -77,15 +77,49 @@ def _aggregate(df: pd.DataFrame, x: str, ys: list[str], how: str) -> pd.DataFram
     return grouped
 
 
+def _apply_filters(df: pd.DataFrame, filters: list[dict[str, Any]]) -> pd.DataFrame:
+    """Apply structured filter dicts of shape {field, op, value}."""
+    if not filters or df is None or df.empty:
+        return df
+    out = df
+    for f in filters:
+        field = f.get("field")
+        op = f.get("op", "eq")
+        value = f.get("value")
+        if field not in out.columns:
+            continue
+        col = out[field]
+        try:
+            if op == "eq":      mask = col == value
+            elif op == "ne":    mask = col != value
+            elif op == "gt":    mask = col > value
+            elif op == "gte":   mask = col >= value
+            elif op == "lt":    mask = col < value
+            elif op == "lte":   mask = col <= value
+            elif op == "in":    mask = col.isin(value if isinstance(value, list) else [value])
+            elif op == "contains":
+                mask = col.astype(str).str.contains(str(value), case=False, na=False)
+            else:
+                continue
+            out = out[mask]
+        except Exception:
+            # Skip filters that fail (e.g., wrong dtype) — never break the preview
+            continue
+    return out
+
+
 # ── routes ──────────────────────────────────────────────────────────────────
 @router.get("", response_model=list[PlotConfig])
 async def list_plots(
     function_id: str | None = Query(default=None),
+    pinned: bool | None = Query(default=None),
     _: str = Depends(get_current_user),
 ):
     items = list(_PLOTS.values())
     if function_id:
         items = [p for p in items if p.function_id == function_id]
+    if pinned is not None:
+        items = [p for p in items if p.pinned_to_overview == pinned]
     return items
 
 
@@ -102,6 +136,40 @@ async def delete_plot(plot_id: str, _: str = Depends(get_current_user)):
     if plot_id not in _PLOTS:
         raise HTTPException(status_code=404, detail="Plot not found")
     del _PLOTS[plot_id]
+
+
+@router.post("/{plot_id}/pin", response_model=PlotConfig)
+async def toggle_pin(plot_id: str, _: str = Depends(get_current_user)):
+    p = _PLOTS.get(plot_id)
+    if not p:
+        raise HTTPException(status_code=404, detail="Plot not found")
+    p.pinned_to_overview = not p.pinned_to_overview
+    return p
+
+
+@router.post("/{plot_id}/filters", response_model=PlotConfig)
+async def update_filters(
+    plot_id: str,
+    payload: dict[str, Any],
+    _: str = Depends(get_current_user),
+):
+    """Replace the tile's filters wholesale, or append a single filter.
+
+    Body shape:
+      { "filters": [...] }                    — replace
+      { "append": {"field": "...", ...} }     — add one
+      { "clear": true }                       — wipe all
+    """
+    p = _PLOTS.get(plot_id)
+    if not p:
+        raise HTTPException(status_code=404, detail="Plot not found")
+    if payload.get("clear"):
+        p.filters = []
+    elif payload.get("append"):
+        p.filters = list(p.filters) + [payload["append"]]
+    elif "filters" in payload:
+        p.filters = list(payload["filters"] or [])
+    return p
 
 
 @router.get("/fields")
@@ -132,26 +200,39 @@ async def preview_plot(plot_id: str, _: str = Depends(get_current_user)):
     if not p:
         raise HTTPException(status_code=404, detail="Plot not found")
 
+    is_table = p.tile_type == "table"
+    row_cap = 1000 if is_table else 200  # tables show more rows; plots aggregate
+
     # Pull data from the configured source
     rows: list[dict[str, Any]] | None = None
+    columns_meta: list[dict[str, str]] | None = None
+
     if p.dataset_id:
         d = _DATASETS.get(p.dataset_id)
         if d and d.source_kind == "upload" and d.file_path and d.file_format:
             try:
                 df = _read_dataframe(_resolve_path(d), d.file_format)
-                df = _aggregate(df, p.x_field, p.y_fields, p.aggregation)
-                rows = _df_records(df, 200)
+                df = _apply_filters(df, p.filters)
+                if not is_table:
+                    df = _aggregate(df, p.x_field, p.y_fields, p.aggregation)
+                rows = _df_records(df, row_cap)
+                columns_meta = [{"name": c, "dtype": str(df[c].dtype)} for c in df.columns]
             except Exception:
                 rows = None
     if rows is None and p.run_id:
         run = _RUNS.get(p.run_id)
         if run and run.series:
             df = pd.DataFrame(run.series)
-            df = _aggregate(df, p.x_field, p.y_fields, p.aggregation)
-            rows = _df_records(df, 200)
+            df = _apply_filters(df, p.filters)
+            if not is_table:
+                df = _aggregate(df, p.x_field, p.y_fields, p.aggregation)
+            rows = _df_records(df, row_cap)
+            columns_meta = [{"name": c, "dtype": str(df[c].dtype)} for c in df.columns]
 
     if rows is not None:
-        return {"plot": p, "preview_data": rows, "source": "live"}
+        return {
+            "plot": p, "preview_data": rows, "columns": columns_meta or [], "source": "live",
+        }
 
     # Fall back to a synthetic sample
     if p.chart_type in ("line", "area", "bar", "stacked_bar"):
@@ -171,4 +252,9 @@ async def preview_plot(plot_id: str, _: str = Depends(get_current_user)):
         ]
     else:
         sample = []
-    return {"plot": p, "preview_data": sample, "source": "sample"}
+    sample_cols = list(sample[0].keys()) if sample else []
+    return {
+        "plot": p, "preview_data": sample,
+        "columns": [{"name": c, "dtype": "object"} for c in sample_cols],
+        "source": "sample",
+    }

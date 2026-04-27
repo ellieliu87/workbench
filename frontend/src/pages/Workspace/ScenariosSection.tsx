@@ -4,6 +4,7 @@ import {
 } from 'lucide-react'
 import api from '@/lib/api'
 import type { Scenario, Dataset } from '@/types'
+import { useChatStore } from '@/store/chatStore'
 import {
   ResponsiveContainer, LineChart, Line, CartesianGrid, XAxis, YAxis, Tooltip, Legend,
 } from 'recharts'
@@ -31,11 +32,23 @@ interface Props {
 }
 
 export default function ScenariosSection({ functionId, functionName, onAskAgent }: Props) {
+  const setEntity = useChatStore((s) => s.setEntity)
   const [scenarios, setScenarios] = useState<Scenario[]>([])
   const [datasets, setDatasets] = useState<Dataset[]>([])
   const [loading, setLoading] = useState(true)
   const [previewFor, setPreviewFor] = useState<Scenario | null>(null)
   const [bindOpen, setBindOpen] = useState(false)
+
+  // Scenarios route to the macro-economist agent (not data-quality), so we
+  // tag the chat context with the scenario entity before dispatching.
+  const explainScenario = (s: Scenario) => {
+    setEntity('scenario', s.id)
+    onAskAgent(
+      `Explain the macro narrative in the "${s.name}" scenario — ` +
+      `regime, rate path, credit/spreads, real economy, and key tail risks. ` +
+      `Skip data-quality and column commentary.`
+    )
+  }
 
   const load = () => {
     setLoading(true)
@@ -94,7 +107,7 @@ export default function ScenariosSection({ functionId, functionName, onAskAgent 
             scenario={s}
             onPreview={() => setPreviewFor(s)}
             onDelete={s.source_kind === 'builtin' ? undefined : () => remove(s.id)}
-            onAskAgent={onAskAgent}
+            onAskAgent={() => explainScenario(s)}
           />
         ))}
       </div>
@@ -121,7 +134,7 @@ function ScenarioCard({
   scenario: Scenario
   onPreview: () => void
   onDelete?: () => void
-  onAskAgent: (q: string) => void
+  onAskAgent: () => void
 }) {
   const color = SEVERITY_COLOR[scenario.severity]
   const isBuiltin = scenario.source_kind === 'builtin'
@@ -176,10 +189,10 @@ function ScenarioCard({
         </div>
         <div className="flex gap-1">
           <button
-            onClick={() => onAskAgent(`Tell me about the "${scenario.name}" scenario.`)}
+            onClick={onAskAgent}
             className="p-1.5 rounded-md transition-colors"
             style={{ color: 'var(--text-muted)' }}
-            title="Ask agent"
+            title="Explain macro narrative"
             onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.color = 'var(--accent)')}
             onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.color = 'var(--text-muted)')}
           >

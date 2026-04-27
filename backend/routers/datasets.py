@@ -26,7 +26,8 @@ from models.schemas import (
     DatasetCreateFromTable,
     DatasetPreview,
 )
-from routers.auth import get_current_user
+from packs import is_pack_visible
+from routers.auth import get_current_user, get_current_user_groups
 from routers.datasources import SAMPLE_TABLES, _DATA_SOURCES
 
 router = APIRouter()
@@ -39,6 +40,54 @@ MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
 SUPPORTED_FORMATS = {"csv", "parquet", "xlsx", "xls", "json"}
 
 _DATASETS: dict[str, Dataset] = {}
+
+
+# ── pack-registered seed ingest ────────────────────────────────────────────
+def _ingest_pack_datasets() -> None:
+    """Pull dataset attachments registered by domain packs into `_DATASETS`.
+
+    Called once at startup after `packs.discover_and_register()` has run.
+    Idempotent: re-calling skips datasets already present."""
+    from packs import dataset_attachments
+
+    now = datetime.utcnow().isoformat() + "Z"
+    for s in dataset_attachments():
+        if s["dataset_id"] in _DATASETS:
+            continue
+        try:
+            src: Path = s["source_path"]
+            if not src.exists():
+                continue
+            ext = src.suffix.lstrip(".").lower()
+            if ext not in SUPPORTED_FORMATS:
+                continue
+            func_dir = DATA_ROOT / s["function_id"]
+            func_dir.mkdir(parents=True, exist_ok=True)
+            rel = f"{s['function_id']}/{s['dataset_id']}.{ext}"
+            dest = DATA_ROOT / rel
+            if not dest.exists():
+                dest.write_bytes(src.read_bytes())
+
+            df = _read_dataframe(dest, ext)
+            ds = Dataset(
+                id=s["dataset_id"],
+                function_id=s["function_id"],
+                name=s["name"],
+                description=s["description"],
+                source_kind="upload",
+                file_path=rel,
+                file_format=ext,  # type: ignore[arg-type]
+                columns=_columns_from_df(df),
+                row_count=int(len(df)),
+                size_bytes=dest.stat().st_size,
+                created_at=now,
+                last_synced=now,
+                pack_id=s.get("pack_id"),
+            )
+            _DATASETS[ds.id] = ds
+        except Exception:
+            # Best-effort seeding — never block import on a bad sample file.
+            continue
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
@@ -135,13 +184,17 @@ def _resolve_path(d: Dataset) -> Path:
     return DATA_ROOT / d.file_path
 
 
+# Pack-registered datasets are ingested by the startup hook in main.py
+# (after `packs.discover_and_register()` has populated the registry).
+
+
 # ── routes ──────────────────────────────────────────────────────────────────
 @router.get("", response_model=list[Dataset])
 async def list_datasets(
     function_id: str | None = Query(default=None),
-    _: str = Depends(get_current_user),
+    groups: list[str] = Depends(get_current_user_groups),
 ):
-    items = list(_DATASETS.values())
+    items = [d for d in _DATASETS.values() if is_pack_visible(d.pack_id, groups)]
     if function_id:
         items = [d for d in items if d.function_id == function_id]
     items.sort(key=lambda d: d.created_at, reverse=True)

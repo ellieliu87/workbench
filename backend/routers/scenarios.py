@@ -24,9 +24,16 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from models.schemas import (
     AnalyticsRun,
+    DestinationWrite,
     RunRequest,
     Scenario,
     ScenarioCreateFromDataset,
+    WorkflowEdge,
+    WorkflowNode,
+    WorkflowRequest,
+    WorkflowResult,
+    WorkflowValidationIssue,
+    WorkflowValidationResult,
 )
 from routers.auth import get_current_user
 from routers.datasets import _DATASETS, _read_dataframe, _resolve_path
@@ -432,3 +439,273 @@ async def create_run(req: RunRequest, _: str = Depends(get_current_user)):
         )
     _RUNS[rid] = run
     return run
+
+
+# ── Workflow runs ──────────────────────────────────────────────────────
+def _topological_sort(nodes: list[WorkflowNode], edges: list[WorkflowEdge]) -> list[WorkflowNode]:
+    """Kahn's algorithm. Raises HTTPException on cycles or missing nodes."""
+    by_id = {n.id: n for n in nodes}
+    for e in edges:
+        if e.source not in by_id or e.target not in by_id:
+            raise HTTPException(status_code=400, detail=f"Edge {e.source}->{e.target} references missing node")
+
+    in_degree: dict[str, int] = {n.id: 0 for n in nodes}
+    children: dict[str, list[str]] = {n.id: [] for n in nodes}
+    for e in edges:
+        in_degree[e.target] += 1
+        children[e.source].append(e.target)
+
+    queue = [n for n in nodes if in_degree[n.id] == 0]
+    ordered: list[WorkflowNode] = []
+    while queue:
+        n = queue.pop(0)
+        ordered.append(n)
+        for c_id in children[n.id]:
+            in_degree[c_id] -= 1
+            if in_degree[c_id] == 0:
+                queue.append(by_id[c_id])
+    if len(ordered) != len(nodes):
+        raise HTTPException(status_code=400, detail="Workflow contains a cycle")
+    return ordered
+
+
+def _resolve_input_frame(
+    node: WorkflowNode,
+    upstream_outputs: dict[str, list[dict[str, Any]]],
+    horizon: int,
+) -> pd.DataFrame:
+    """Turn one upstream node into a DataFrame the consuming model can read."""
+    if node.kind == "dataset":
+        df, _, _ = _input_dataframe(scenario_id=None, dataset_id=node.ref_id, horizon=horizon)
+        return df
+    if node.kind == "scenario":
+        df, _, _ = _input_dataframe(scenario_id=node.ref_id, dataset_id=None, horizon=horizon)
+        return df
+    if node.kind == "model":
+        # Use the model node's run output as a frame (already shaped with 'month'+driver cols)
+        rows = upstream_outputs.get(node.id, [])
+        if not rows:
+            raise HTTPException(status_code=400, detail=f"Model node {node.id} has no upstream output yet")
+        return pd.DataFrame(rows)
+    raise HTTPException(status_code=400, detail=f"Unknown node kind {node.kind}")
+
+
+def _merge_frames(frames: list[pd.DataFrame]) -> pd.DataFrame:
+    """Outer-join multiple DataFrames on 'month' (or row index if absent)."""
+    if not frames:
+        raise HTTPException(status_code=400, detail="Model node has no incoming inputs")
+    if len(frames) == 1:
+        return frames[0]
+    # Ensure each frame has a 'month' key for the join
+    norm: list[pd.DataFrame] = []
+    for df in frames:
+        if "month" not in df.columns:
+            df = df.assign(month=list(range(1, len(df) + 1)))
+        norm.append(df)
+    base = norm[0]
+    for other in norm[1:]:
+        # Drop columns from the other frame that already exist in base (except 'month')
+        dup_cols = [c for c in other.columns if c in base.columns and c != "month"]
+        other_clean = other.drop(columns=dup_cols)
+        base = base.merge(other_clean, on="month", how="outer")
+    base = base.sort_values("month").reset_index(drop=True)
+    base = base.ffill().bfill()
+    return base
+
+
+def _write_destination(
+    dest_node: WorkflowNode,
+    upstream_run: AnalyticsRun,
+) -> DestinationWrite:
+    """'Write' a model run's series to a destination.
+
+    Snowflake / OneLake / S3 writes are mocked for the demo (we just record the
+    target and row count). CSV destinations carry the series back so the
+    browser can trigger a file download.
+    """
+    kind = dest_node.ref_id
+    cfg = dest_node.config or {}
+    rows = upstream_run.series
+    n = len(rows)
+
+    if kind == "snowflake_table":
+        target = cfg.get("table") or cfg.get("ref") or "CMA.PUBLIC.OUTPUT"
+        return DestinationWrite(
+            node_id=dest_node.id, kind="snowflake_table", target=target,
+            upstream_model_id=upstream_run.model_id, upstream_run_id=upstream_run.id,
+            rows_written=n, status="written",
+            note=f"Mock write to Snowflake — {cfg.get('mode', 'append')} mode",
+        )
+    if kind == "onelake_table":
+        target = cfg.get("table") or cfg.get("ref") or "Finance.cma.output"
+        return DestinationWrite(
+            node_id=dest_node.id, kind="onelake_table", target=target,
+            upstream_model_id=upstream_run.model_id, upstream_run_id=upstream_run.id,
+            rows_written=n, status="written",
+            note="Mock write to OneLake lakehouse table",
+        )
+    if kind == "s3":
+        bucket = cfg.get("bucket") or "cma-outputs"
+        key = cfg.get("key") or f"runs/{upstream_run.id}.parquet"
+        target = f"s3://{bucket}/{key}"
+        return DestinationWrite(
+            node_id=dest_node.id, kind="s3", target=target,
+            upstream_model_id=upstream_run.model_id, upstream_run_id=upstream_run.id,
+            rows_written=n, status="written",
+            note=f"Mock write to S3 — {cfg.get('format', 'parquet')} format",
+        )
+    if kind == "csv":
+        filename = cfg.get("filename") or f"{upstream_run.id}.csv"
+        return DestinationWrite(
+            node_id=dest_node.id, kind="csv", target=filename,
+            upstream_model_id=upstream_run.model_id, upstream_run_id=upstream_run.id,
+            rows_written=n, status="written",
+            csv_filename=filename, csv_data=rows,
+            note="CSV bytes returned to browser for download",
+        )
+    return DestinationWrite(
+        node_id=dest_node.id, kind=kind,  # type: ignore[arg-type]
+        target=str(cfg), upstream_model_id=upstream_run.model_id,
+        upstream_run_id=upstream_run.id, rows_written=0, status="failed",
+        note=f"Unknown destination kind '{kind}'",
+    )
+
+
+@router.post("/workflow-runs", response_model=WorkflowResult, status_code=201)
+async def create_workflow_run(req: WorkflowRequest, _: str = Depends(get_current_user)):
+    started = datetime.utcnow()
+    workflow_id = f"wf-{uuid.uuid4().hex[:10]}"
+
+    model_nodes = [n for n in req.nodes if n.kind == "model"]
+    if not model_nodes:
+        raise HTTPException(status_code=400, detail="Workflow must contain at least one model node")
+
+    try:
+        ordered = _topological_sort(req.nodes, req.edges)
+    except HTTPException:
+        raise
+
+    by_id = {n.id: n for n in req.nodes}
+    incoming: dict[str, list[str]] = {n.id: [] for n in req.nodes}
+    outgoing: dict[str, list[str]] = {n.id: [] for n in req.nodes}
+    for e in req.edges:
+        incoming[e.target].append(e.source)
+        outgoing[e.source].append(e.target)
+
+    outputs: dict[str, list[dict[str, Any]]] = {}
+    model_runs_by_node: dict[str, AnalyticsRun] = {}
+    runs: list[AnalyticsRun] = []
+    destinations: list[DestinationWrite] = []
+    node_status: dict[str, str] = {n.id: "idle" for n in req.nodes}
+    step_idx = 0
+
+    for node in ordered:
+        if node.kind in ("dataset", "scenario"):
+            node_status[node.id] = "completed"
+            continue
+
+        if node.kind == "destination":
+            # Find the upstream model that feeds this destination
+            sources = incoming.get(node.id, [])
+            if not sources:
+                node_status[node.id] = "skipped"
+                continue
+            wrote_any = False
+            for src in sources:
+                src_run = model_runs_by_node.get(src)
+                if not src_run or src_run.status != "completed":
+                    continue
+                dw = _write_destination(node, src_run)
+                destinations.append(dw)
+                wrote_any = wrote_any or dw.status == "written"
+            node_status[node.id] = "completed" if wrote_any else "skipped"
+            continue
+
+        # node.kind == 'model'
+        sources = incoming.get(node.id, [])
+        if not sources:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Model node '{node.id}' has no input — connect a dataset, scenario, or upstream model.",
+            )
+
+        frames = [_resolve_input_frame(by_id[s], outputs, req.horizon_months) for s in sources]
+        merged = _merge_frames(frames)
+        if "month" in merged.columns:
+            merged = merged[merged["month"] <= req.horizon_months]
+        else:
+            merged = merged.head(req.horizon_months)
+
+        m = _MODELS.get(node.ref_id)
+        if not m:
+            raise HTTPException(status_code=404, detail=f"Model {node.ref_id} not found")
+
+        run_started = datetime.utcnow()
+        try:
+            series, summary = _apply_model(node.ref_id, merged)
+            run_status_lit = "completed"
+            run_error = None
+        except Exception as e:
+            series, summary, run_status_lit, run_error = [], {}, "failed", str(e)
+
+        rid = f"run-{uuid.uuid4().hex[:10]}"
+        m.last_run = run_started.isoformat() + "Z"
+        run = AnalyticsRun(
+            id=rid,
+            function_id=req.function_id,
+            name=f"{m.name} (step {step_idx + 1})",
+            model_id=node.ref_id,
+            input_kind="workflow",
+            workflow_id=workflow_id,
+            workflow_step_index=step_idx,
+            input_node_ids=sources,
+            horizon_months=req.horizon_months,
+            status=run_status_lit,  # type: ignore[arg-type]
+            summary=summary,
+            series=series,
+            notes=req.notes,
+            error=run_error,
+            created_at=run_started.isoformat() + "Z",
+            duration_ms=(datetime.utcnow() - run_started).total_seconds() * 1000,
+        )
+        _RUNS[rid] = run
+        runs.append(run)
+        model_runs_by_node[node.id] = run
+        outputs[node.id] = series
+        node_status[node.id] = run_status_lit
+        step_idx += 1
+
+        if run_status_lit == "failed":
+            return WorkflowResult(
+                workflow_id=workflow_id,
+                status="partial",
+                runs=runs,
+                destinations=destinations,
+                node_status=node_status,  # type: ignore[arg-type]
+                error=run_error,
+                duration_ms=(datetime.utcnow() - started).total_seconds() * 1000,
+            )
+
+    return WorkflowResult(
+        workflow_id=workflow_id,
+        status="completed" if runs else "failed",
+        runs=runs,
+        destinations=destinations,
+        node_status=node_status,  # type: ignore[arg-type]
+        duration_ms=(datetime.utcnow() - started).total_seconds() * 1000,
+    )
+
+
+@router.post("/workflow-validate", response_model=WorkflowValidationResult)
+async def validate_workflow(req: WorkflowRequest, _: str = Depends(get_current_user)):
+    """Reuses the chat router's validator for a single source of truth."""
+    from routers.chat import _validate_workflow_payload  # local import to avoid circular
+    issues_raw = _validate_workflow_payload(
+        [n.model_dump() for n in req.nodes],
+        [e.model_dump() for e in req.edges],
+    )
+    issues = [WorkflowValidationIssue(**i) for i in issues_raw]
+    return WorkflowValidationResult(
+        ok=not any(i.severity == "error" for i in issues),
+        issues=issues,
+    )

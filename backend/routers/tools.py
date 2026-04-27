@@ -22,10 +22,14 @@ from models.schemas import (
     PythonTool,
     PythonToolCreate,
     PythonToolUpdate,
+    ToolDraftRequest,
+    ToolDraftResponse,
+    ToolParameter,
     ToolTestRequest,
     ToolTestResponse,
 )
-from routers.auth import get_current_user
+from packs import is_pack_visible
+from routers.auth import get_current_user, get_current_user_groups
 
 router = APIRouter()
 
@@ -48,7 +52,7 @@ DEFAULT_SOURCE = '''def my_tool(symbol: str, lookback_days: int = 30):
 def _seed():
     if _TOOLS:
         return
-    seeds = [
+    builtin_seeds = [
         PythonTool(
             id="tool-sql-query",
             name="sql_query",
@@ -64,6 +68,7 @@ def _seed():
             ),
             function_name="sql_query",
             enabled=True,
+            source="builtin",
         ),
         PythonTool(
             id="tool-metadata-lookup",
@@ -84,6 +89,7 @@ def _seed():
             ),
             function_name="metadata_lookup",
             enabled=True,
+            source="builtin",
         ),
         PythonTool(
             id="tool-scenario-parallel",
@@ -100,10 +106,28 @@ def _seed():
             ),
             function_name="scenario_parallel",
             enabled=True,
+            source="builtin",
         ),
     ]
-    for t in seeds:
+    for t in builtin_seeds:
         _TOOLS[t.id] = t
+
+    # Pull in pack-registered tools (each domain pack registers its tools at
+    # startup via PackContext.register_python_tool; the seeds end up in
+    # `packs.python_tool_seeds()`).
+    _ingest_pack_seeds()
+
+
+def _ingest_pack_seeds() -> None:
+    """Idempotent — pack-registered tools land in `_TOOLS` keyed by id.
+    Safe to call again after `discover_and_register()` runs."""
+    from packs import python_tool_seeds
+    for s in python_tool_seeds():
+        if s["id"] in _TOOLS:
+            continue
+        _TOOLS[s["id"]] = PythonTool(**s)
+
+
 
 
 _seed()
@@ -200,9 +224,137 @@ async def get_template(_: str = Depends(get_current_user)):
     return {"python_source": DEFAULT_SOURCE, "function_name": "my_tool"}
 
 
+_DRAFT_SYSTEM_PROMPT = """You are a senior Python engineer helping an analyst draft a single
+Python function that will be registered as an agent tool in the CMA Workbench.
+
+You produce ONE pure Python function only. It must:
+- Use only the standard library (no third-party imports).
+- Have explicit type hints on every parameter and on the return type.
+- Have a one-line docstring summarizing what it does.
+- Return a JSON-serializable result (dict / list / str / number / bool).
+- Be deterministic — no randomness, no time-dependent behavior unless required.
+- Avoid network calls, file IO outside `tempfile`, and `os.system` / `subprocess` shell calls.
+- Keep the body short (under ~40 lines). If the task needs more, summarize the
+  approach in `notes` and keep the body to a clean skeleton.
+
+You respond with STRICT JSON matching this schema (no markdown, no prose):
+
+{
+  "name":          string  // snake_case, the public tool name
+  "description":   string  // ONE sentence describing what it does
+  "function_name": string  // matches `name` exactly
+  "parameters":    [ { "name": string, "type": "string"|"integer"|"number"|"boolean"|"object"|"array",
+                       "description": string, "required": boolean } ]
+  "python_source": string  // the full `def ...:` definition, ready to paste into an editor
+  "notes":         string  // optional caveats, e.g. "stub data — replace with real query"
+}
+
+If the analyst's request is ambiguous, pick a sensible interpretation and mention
+your assumptions in `notes`. Never refuse — produce a working starting point even
+if the spec is fuzzy."""
+
+
+@router.post("/draft", response_model=ToolDraftResponse)
+async def draft_tool(req: ToolDraftRequest, _: str = Depends(get_current_user)):
+    """Ask the LLM to draft a Python tool from a plain-English description.
+
+    Returns a structured draft the analyst can review, edit, test, and save.
+    Uses the same OpenAI/COF connection the orchestrator uses; if neither is
+    configured, returns 503 with a setup-required message.
+    """
+    cof_base = os.getenv("COF_BASE_URL")
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not (cof_base or api_key):
+        raise HTTPException(
+            status_code=503,
+            detail="LLM not configured. Set OPENAI_API_KEY or COF_BASE_URL in backend/.env and restart.",
+        )
+
+    try:
+        from openai import AsyncOpenAI
+    except ImportError:
+        raise HTTPException(status_code=503, detail="openai package not installed.")
+
+    client_kwargs: dict[str, Any] = {}
+    if cof_base:
+        client_kwargs["base_url"] = cof_base
+        client_kwargs["api_key"] = os.getenv("COF_API_KEY", "cof-internal")
+    else:
+        client_kwargs["api_key"] = api_key
+    client = AsyncOpenAI(**client_kwargs)
+
+    user_msg = req.prompt.strip()
+    if req.context:
+        user_msg += f"\n\n[Additional context]\n{req.context.strip()}"
+
+    try:
+        completion = await client.chat.completions.create(
+            model=os.getenv("CMA_TOOL_DRAFT_MODEL", "gpt-4o"),
+            messages=[
+                {"role": "system", "content": _DRAFT_SYSTEM_PROMPT},
+                {"role": "user", "content": user_msg},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.2,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"LLM call failed: {e}")
+
+    raw = completion.choices[0].message.content or ""
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=502, detail=f"LLM returned non-JSON: {e}")
+
+    # Normalize and validate the agent's draft before returning. We are lenient
+    # — accept missing optional fields, reject only on clearly-broken outputs.
+    name = (data.get("name") or "").strip()
+    fn_name = (data.get("function_name") or name).strip() or "my_tool"
+    if not name:
+        name = fn_name
+    description = (data.get("description") or "").strip() or "Generated tool"
+    raw_params = data.get("parameters") or []
+    params: list[ToolParameter] = []
+    for p in raw_params:
+        if not isinstance(p, dict) or "name" not in p:
+            continue
+        ptype = p.get("type", "string")
+        if ptype not in ("string", "integer", "number", "boolean", "object", "array"):
+            ptype = "string"
+        params.append(ToolParameter(
+            name=str(p["name"]),
+            type=ptype,
+            description=str(p.get("description") or "") or None,
+            required=bool(p.get("required", True)),
+        ))
+    source = data.get("python_source") or ""
+    if not source.strip():
+        raise HTTPException(status_code=502, detail="LLM returned empty python_source.")
+
+    # Sanity-check the source parses and defines fn_name. If not, surface that
+    # to the analyst as a `notes` warning rather than rejecting — they may
+    # still want to see what the agent produced and fix it themselves.
+    notes = data.get("notes")
+    ok, err = _validate_source(source, fn_name)
+    if not ok:
+        warning = f"Draft validation: {err}"
+        notes = f"{notes}\n{warning}" if notes else warning
+
+    return ToolDraftResponse(
+        name=name,
+        description=description,
+        function_name=fn_name,
+        parameters=params,
+        python_source=source,
+        notes=notes,
+    )
+
+
 @router.get("", response_model=list[PythonTool])
-async def list_tools(_: str = Depends(get_current_user)):
-    return list(_TOOLS.values())
+async def list_tools(groups: list[str] = Depends(get_current_user_groups)):
+    """Pack-scoped tools are filtered by the user's groups; universal
+    (`builtin` / `user`) tools are always returned."""
+    return [t for t in _TOOLS.values() if is_pack_visible(t.pack_id, groups)]
 
 
 @router.get("/{tool_id}", response_model=PythonTool)

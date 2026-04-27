@@ -1,7 +1,16 @@
-import { useEffect, useRef, useState } from 'react'
-import { Plus, Pencil, Trash2, Upload, Wrench, Database, FileText, ShieldAlert, Star, X, Sparkles } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Plus, Pencil, Trash2, Upload, Wrench, Database, FileText, ShieldAlert, Star, X, Sparkles, Lock, UserCog, Search, AlertTriangle } from 'lucide-react'
 import api from '@/lib/api'
-import type { AgentSkill, PythonTool } from '@/types'
+import type { AgentSkill } from '@/types'
+
+interface AvailableTool {
+  name: string
+  description: string
+  kind: 'introspection' | 'python'
+  source: 'builtin' | 'user'
+  parameter_count: number
+  enabled: boolean
+}
 
 const CATEGORY_META: Record<AgentSkill['category'], { label: string; icon: any; color: string }> = {
   analytical: { label: 'Analytical', icon: Wrench,      color: '#0891B2' },
@@ -29,7 +38,7 @@ const EMPTY_SKILL: AgentSkill = {
 
 export default function SkillsTab() {
   const [skills, setSkills] = useState<AgentSkill[]>([])
-  const [tools, setTools] = useState<PythonTool[]>([])
+  const [tools, setTools] = useState<AvailableTool[]>([])
   const [loading, setLoading] = useState(true)
   const [editor, setEditor] = useState<EditorState>({ open: false, mode: 'create', skill: null })
   const fileRef = useRef<HTMLInputElement>(null)
@@ -38,7 +47,7 @@ export default function SkillsTab() {
     setLoading(true)
     Promise.all([
       api.get<AgentSkill[]>('/api/skills'),
-      api.get<PythonTool[]>('/api/tools'),
+      api.get<AvailableTool[]>('/api/skills/_available_tools'),
     ])
       .then(([s, t]) => { setSkills(s.data); setTools(t.data) })
       .finally(() => setLoading(false))
@@ -156,10 +165,27 @@ export default function SkillsTab() {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        {skills.map((s) => {
+      {(() => {
+        const userCustom = skills.filter((s) => s.source === 'user')
+        const builtin = skills.filter((s) => (s.source ?? 'builtin') === 'builtin')
+        // Group pack-derived skills by their pack_id so each pack gets its
+        // own section. Packs are sorted alphabetically; skills within a pack
+        // are kept in API order.
+        const packedByPack = new Map<string, AgentSkill[]>()
+        for (const s of skills) {
+          if (s.source !== 'pack') continue
+          const pid = s.pack_id || 'unknown'
+          if (!packedByPack.has(pid)) packedByPack.set(pid, [])
+          packedByPack.get(pid)!.push(s)
+        }
+
+        const renderCard = (s: AgentSkill) => {
           const meta = CATEGORY_META[s.category]
           const Icon = meta.icon
+          const isUser = s.source === 'user'
+          const isPack = s.source === 'pack'
+          const badgeBg = isUser ? 'rgba(217,119,6,0.12)' : isPack ? 'rgba(37,99,235,0.12)' : 'rgba(8,145,178,0.12)'
+          const badgeColor = isUser ? '#D97706' : isPack ? '#2563EB' : '#0891B2'
           return (
             <div key={s.id} className="panel">
               <div className="flex items-start justify-between mb-2">
@@ -171,7 +197,25 @@ export default function SkillsTab() {
                     <Icon size={16} />
                   </div>
                   <div className="min-w-0">
-                    <div className="font-semibold text-sm truncate">{s.name}</div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="font-semibold text-sm truncate">{s.name}</span>
+                      <span
+                        className="pill flex items-center gap-1"
+                        style={{
+                          fontSize: 9,
+                          fontWeight: 700,
+                          background: badgeBg,
+                          color: badgeColor,
+                          borderColor: 'transparent',
+                          textTransform: 'uppercase',
+                          letterSpacing: '0.06em',
+                        }}
+                      >
+                        {isUser ? <><UserCog size={9} /> User</>
+                          : isPack ? <>Pack: {s.pack_id}</>
+                          : <><Lock size={9} /> Built-in</>}
+                      </span>
+                    </div>
                     <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
                       {meta.label}
                     </div>
@@ -208,27 +252,112 @@ export default function SkillsTab() {
                   onClick={() => openEdit(s)}
                   className="p-1.5 rounded-md transition-colors"
                   style={{ color: 'var(--text-muted)' }}
-                  title="Edit"
+                  title={isUser ? 'Edit' : 'View / fork to user copy'}
                   onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.color = 'var(--accent)')}
                   onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.color = 'var(--text-muted)')}
                 >
                   <Pencil size={13} />
                 </button>
-                <button
-                  onClick={() => remove(s.id)}
-                  className="p-1.5 rounded-md transition-colors"
-                  style={{ color: 'var(--text-muted)' }}
-                  title="Delete"
-                  onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.color = 'var(--error)')}
-                  onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.color = 'var(--text-muted)')}
-                >
-                  <Trash2 size={13} />
-                </button>
+                {isUser && (
+                  <button
+                    onClick={() => remove(s.id)}
+                    className="p-1.5 rounded-md transition-colors"
+                    style={{ color: 'var(--text-muted)' }}
+                    title="Delete"
+                    onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.color = 'var(--error)')}
+                    onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.color = 'var(--text-muted)')}
+                  >
+                    <Trash2 size={13} />
+                  </button>
+                )}
               </div>
             </div>
           )
-        })}
-      </div>
+        }
+
+        const SectionHeader = ({
+          icon: Icon, color, title, subtitle, count,
+        }: { icon: any; color: string; title: string; subtitle: string; count: number }) => (
+          <div className="flex items-center gap-2 mb-2 mt-1">
+            <div
+              className="w-6 h-6 rounded-md flex items-center justify-center"
+              style={{ background: `${color}1A`, color }}
+            >
+              <Icon size={13} />
+            </div>
+            <div className="flex items-baseline gap-2 min-w-0">
+              <span className="text-[12px] font-semibold uppercase tracking-widest" style={{ color: 'var(--text-primary)' }}>
+                {title}
+              </span>
+              <span className="text-[10px] font-mono" style={{ color: 'var(--text-muted)' }}>
+                {count} skill{count === 1 ? '' : 's'}
+              </span>
+              <span className="text-[11px] truncate" style={{ color: 'var(--text-muted)' }}>
+                · {subtitle}
+              </span>
+            </div>
+          </div>
+        )
+
+        const packIds = Array.from(packedByPack.keys()).sort()
+
+        return (
+          <>
+            <SectionHeader
+              icon={UserCog}
+              color="#D97706"
+              title="User-Customized Skills"
+              subtitle="Skills you uploaded or created. Editable & deletable."
+              count={userCustom.length}
+            />
+            {userCustom.length === 0 ? (
+              <div className="panel text-center py-6 text-xs mb-5" style={{ color: 'var(--text-muted)' }}>
+                None yet. Click <strong>+ New Skill</strong> or <strong>Upload Skill</strong> to add your own.
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-5">
+                {userCustom.map(renderCard)}
+              </div>
+            )}
+
+            {/* One section per domain pack — scales naturally to 5-6 packs. */}
+            {packIds.map((pid) => {
+              const inPack = packedByPack.get(pid) || []
+              return (
+                <div key={pid}>
+                  <SectionHeader
+                    icon={Star}
+                    color="#2563EB"
+                    title={`Domain Pack — ${pid}`}
+                    subtitle="Installed by a domain pack. Read-only here; manage with the pack."
+                    count={inPack.length}
+                  />
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-5">
+                    {inPack.map(renderCard)}
+                  </div>
+                </div>
+              )
+            })}
+
+            <SectionHeader
+              icon={Lock}
+              color="#0891B2"
+              title="Built-in Skills"
+              subtitle="Shipped with the workbench. Read-only — fork by editing & saving."
+              count={builtin.length}
+            />
+            {builtin.length === 0 ? (
+              <div className="panel text-center py-6 text-xs" style={{ color: 'var(--text-muted)' }}>
+                No built-in skills found in <code>agent/skills/</code>.
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {builtin.map(renderCard)}
+              </div>
+            )}
+          </>
+        )
+      })()}
 
       {editor.open && editor.skill && (
         <SkillEditor
@@ -247,7 +376,7 @@ export default function SkillsTab() {
 
 interface EditorProps {
   state: EditorState
-  tools: PythonTool[]
+  tools: AvailableTool[]
   onClose: () => void
   onSave: () => void
   onChange: <K extends keyof AgentSkill>(k: K, v: AgentSkill[K]) => void
@@ -353,52 +482,11 @@ function SkillEditor({ state, tools, onClose, onSave, onChange, onToggleTool, on
             />
           </div>
 
-          <div>
-            <div
-              className="text-[11px] font-semibold uppercase tracking-widest mb-1"
-              style={{ color: 'var(--text-secondary)' }}
-            >
-              Tools ({s.tools.length} selected)
-            </div>
-            <div
-              className="rounded-lg p-2 space-y-1"
-              style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border)', maxHeight: 220, overflowY: 'auto' }}
-            >
-              {tools.length === 0 && (
-                <div className="text-xs px-2 py-3" style={{ color: 'var(--text-muted)' }}>
-                  No tools yet. Open the <strong>Tools</strong> tab to register Python functions.
-                </div>
-              )}
-              {tools.map((t) => {
-                const sel = s.tools.includes(t.name)
-                return (
-                  <label
-                    key={t.id}
-                    className="flex items-start gap-2 px-2 py-2 rounded-md cursor-pointer transition-colors"
-                    style={{ background: sel ? 'var(--accent-light)' : 'transparent' }}
-                  >
-                    <input type="checkbox" checked={sel} onChange={() => onToggleTool(t.name)} className="mt-0.5" />
-                    <div className="flex-1 min-w-0">
-                      <div
-                        className="font-mono text-[12px] font-semibold"
-                        style={{ color: sel ? 'var(--accent)' : 'var(--text-primary)' }}
-                      >
-                        {t.name}
-                      </div>
-                      <div className="text-xs" style={{ color: 'var(--text-secondary)' }}>
-                        {t.description}
-                      </div>
-                    </div>
-                    {!t.enabled && (
-                      <span className="pill" style={{ fontSize: 9, color: 'var(--text-muted)' }}>
-                        OFF
-                      </span>
-                    )}
-                  </label>
-                )
-              })}
-            </div>
-          </div>
+          <ToolPicker
+            allTools={tools}
+            selected={s.tools}
+            onToggle={onToggleTool}
+          />
         </div>
 
         {/* Footer */}
@@ -441,5 +529,236 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       </span>
       {children}
     </label>
+  )
+}
+
+// ── Tool picker: chips for what's wired in + search-to-add for the rest ──
+function ToolPicker({
+  allTools, selected, onToggle,
+}: {
+  allTools: AvailableTool[]
+  selected: string[]
+  onToggle: (name: string) => void
+}) {
+  const [query, setQuery] = useState('')
+  const [open, setOpen] = useState(false)
+  const [activeIdx, setActiveIdx] = useState(0)
+  const inputRef = useRef<HTMLInputElement>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
+
+  const byName = useMemo(() => {
+    const m = new Map<string, AvailableTool>()
+    for (const t of allTools) m.set(t.name, t)
+    return m
+  }, [allTools])
+
+  const selectedTools = selected.map((n) => byName.get(n) || null)
+  const unknownNames = selected.filter((n) => !byName.has(n))
+
+  // What's not wired in yet, optionally narrowed by the query.
+  const candidates = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    return allTools
+      .filter((t) => !selected.includes(t.name))
+      .filter((t) => !q || t.name.toLowerCase().includes(q) || t.description.toLowerCase().includes(q))
+  }, [allTools, selected, query])
+
+  // Click-outside closes the dropdown.
+  useEffect(() => {
+    if (!open) return
+    const onClick = (e: MouseEvent) => {
+      if (!containerRef.current?.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onClick)
+    return () => document.removeEventListener('mousedown', onClick)
+  }, [open])
+
+  const addTool = (name: string) => {
+    onToggle(name)
+    setQuery('')
+    setActiveIdx(0)
+    inputRef.current?.focus()
+  }
+
+  return (
+    <div>
+      <div
+        className="flex items-baseline justify-between mb-1"
+      >
+        <span className="text-[11px] font-semibold uppercase tracking-widest" style={{ color: 'var(--text-secondary)' }}>
+          Tools ({selected.length})
+        </span>
+        <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
+          {allTools.length} available · {selected.length === 0 ? 'add the first one below' : 'click × on a chip to remove'}
+        </span>
+      </div>
+
+      {/* Selected chips */}
+      <div
+        className="rounded-lg p-2 flex flex-wrap gap-1.5 min-h-[44px]"
+        style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border)' }}
+      >
+        {selected.length === 0 && unknownNames.length === 0 && (
+          <span className="text-[11px] px-1 py-1" style={{ color: 'var(--text-muted)' }}>
+            No tools wired in yet.
+          </span>
+        )}
+
+        {unknownNames.map((name) => (
+          <span
+            key={`missing:${name}`}
+            className="inline-flex items-center gap-1 rounded-full"
+            style={{
+              padding: '3px 6px 3px 8px',
+              background: 'var(--warning-bg)',
+              color: 'var(--warning)',
+              border: '1px solid currentColor',
+              fontSize: 11,
+            }}
+            title="Tool not in catalog — probably a typo or it was deleted. Click × to remove."
+          >
+            <AlertTriangle size={10} />
+            <span className="font-mono">{name}</span>
+            <button
+              onClick={() => onToggle(name)}
+              className="ml-1 rounded-full"
+              style={{ width: 14, height: 14, lineHeight: '12px', textAlign: 'center', background: 'transparent', color: 'inherit' }}
+            >
+              <X size={10} />
+            </button>
+          </span>
+        ))}
+
+        {selectedTools.map((t, i) => {
+          if (!t) return null
+          const isUser = t.source === 'user'
+          const isPython = t.kind === 'python'
+          return (
+            <span
+              key={`sel:${t.name}`}
+              className="inline-flex items-center gap-1 rounded-full"
+              style={{
+                padding: '3px 6px 3px 8px',
+                background: 'var(--accent-light)',
+                color: 'var(--accent)',
+                border: '1px solid var(--accent)',
+                fontSize: 11,
+              }}
+              title={`${t.kind === 'introspection' ? 'introspection' : (isUser ? 'user python tool' : 'built-in python tool')}${t.description ? ' — ' + t.description : ''}`}
+            >
+              <span className="font-mono">{t.name}</span>
+              {isUser && (
+                <span style={{ fontSize: 8, fontWeight: 700, opacity: 0.85 }}>U</span>
+              )}
+              {!isPython && (
+                <span style={{ fontSize: 8, fontWeight: 700, opacity: 0.6 }}>·intro</span>
+              )}
+              <button
+                onClick={() => onToggle(t.name)}
+                className="ml-1 rounded-full"
+                style={{ width: 14, height: 14, lineHeight: '12px', textAlign: 'center', background: 'transparent', color: 'inherit' }}
+              >
+                <X size={10} />
+              </button>
+            </span>
+          )
+        })}
+      </div>
+
+      {/* Search-to-add */}
+      <div ref={containerRef} className="relative mt-2">
+        <div
+          className="flex items-center gap-2 rounded-lg px-2"
+          style={{ background: 'var(--bg-card)', border: '1px solid var(--border)' }}
+        >
+          <Search size={13} style={{ color: 'var(--text-muted)' }} />
+          <input
+            ref={inputRef}
+            value={query}
+            onFocus={() => setOpen(true)}
+            onChange={(e) => { setQuery(e.target.value); setOpen(true); setActiveIdx(0) }}
+            onKeyDown={(e) => {
+              if (!open) return
+              if (e.key === 'ArrowDown') { e.preventDefault(); setActiveIdx((i) => Math.min(i + 1, candidates.length - 1)) }
+              else if (e.key === 'ArrowUp') { e.preventDefault(); setActiveIdx((i) => Math.max(i - 1, 0)) }
+              else if (e.key === 'Enter' && candidates[activeIdx]) { e.preventDefault(); addTool(candidates[activeIdx].name) }
+              else if (e.key === 'Escape') { setOpen(false) }
+            }}
+            placeholder={selected.length === 0 ? 'Search and add tools…' : 'Add another tool…'}
+            className="flex-1 py-2 outline-none"
+            style={{ background: 'transparent', border: 'none', fontSize: 12, color: 'var(--text-primary)' }}
+          />
+          {query && (
+            <button
+              onClick={() => { setQuery(''); inputRef.current?.focus() }}
+              className="text-[10px]"
+              style={{ color: 'var(--text-muted)' }}
+            >
+              clear
+            </button>
+          )}
+        </div>
+
+        {open && (
+          <div
+            className="absolute left-0 right-0 mt-1 rounded-lg overflow-y-auto"
+            style={{
+              background: 'var(--bg-card)',
+              border: '1px solid var(--border)',
+              boxShadow: '0 8px 24px rgba(0,0,0,0.12)',
+              maxHeight: 280,
+              zIndex: 60,
+            }}
+          >
+            {candidates.length === 0 ? (
+              <div className="text-xs px-3 py-2" style={{ color: 'var(--text-muted)' }}>
+                {query.trim() ? 'No tools match.' : 'All available tools are already wired in.'}
+              </div>
+            ) : (
+              candidates.map((t, i) => {
+                const active = i === activeIdx
+                return (
+                  <button
+                    key={`add:${t.kind}:${t.name}`}
+                    onMouseEnter={() => setActiveIdx(i)}
+                    onClick={() => addTool(t.name)}
+                    className="w-full flex items-start gap-2 px-3 py-2 text-left transition-colors"
+                    style={{ background: active ? 'var(--bg-elevated)' : 'transparent' }}
+                  >
+                    <span
+                      className="mt-0.5 inline-block rounded"
+                      style={{
+                        padding: '1px 5px',
+                        fontSize: 8,
+                        fontWeight: 700,
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.06em',
+                        background: t.kind === 'introspection'
+                          ? 'rgba(8,145,178,0.12)'
+                          : (t.source === 'user' ? 'rgba(217,119,6,0.12)' : 'rgba(5,150,105,0.12)'),
+                        color: t.kind === 'introspection'
+                          ? '#0891B2'
+                          : (t.source === 'user' ? '#D97706' : '#059669'),
+                      }}
+                    >
+                      {t.kind === 'introspection' ? 'INTRO' : (t.source === 'user' ? 'USER' : 'BUILTIN')}
+                    </span>
+                    <div className="flex-1 min-w-0">
+                      <div className="font-mono text-[12px] font-semibold" style={{ color: 'var(--text-primary)' }}>
+                        {t.name}
+                      </div>
+                      <div className="text-[11px] truncate" style={{ color: 'var(--text-muted)' }}>
+                        {t.description || `${t.parameter_count} param${t.parameter_count === 1 ? '' : 's'}`}
+                      </div>
+                    </div>
+                    <Plus size={11} style={{ color: 'var(--accent)', marginTop: 4 }} />
+                  </button>
+                )
+              })
+            )}
+          </div>
+        )}
+      </div>
+    </div>
   )
 }
