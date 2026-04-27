@@ -281,36 +281,31 @@ class CofBaseAgent:
                 messages.append({"role": "user", "content": f"[Context]\n{extra_context}"})
             messages.append({"role": "user", "content": user_message})
 
-            trace: list[dict] = []
-            seen_ids: set[int] = set()  # id() of items we've already emitted
-
-            stream = Runner.run_streamed(
+            # Match oasia exactly: non-streaming Runner.run. Some corporate
+            # proxy environments do not pass through Server-Sent Events
+            # cleanly (or the company's openai SDK fork's streaming path is
+            # incomplete), so a streaming call returns nothing while the
+            # non-streaming path goes through. Trace steps are derived after
+            # the run from `result.new_items`.
+            result: RunResult = await Runner.run(
                 starting_agent=self._agent,
                 input=messages,
                 max_turns=self.MAX_TURNS,
             )
-            async for ev in stream.stream_events():
-                # Only the run_item_stream_event carries the structured items
-                # we want to surface as trace steps. The raw token stream is
-                # too noisy and the agent_updated event is implicit in handoffs.
-                ev_type = getattr(ev, "type", None)
-                if ev_type == "run_item_stream_event":
-                    item = getattr(ev, "item", None)
-                    if item is None or id(item) in seen_ids:
-                        continue
-                    seen_ids.add(id(item))
-                    step = _step_from_item(item)
-                    if step is not None:
-                        trace.append(step)
-                        if on_step is not None:
-                            try:
-                                on_step(step)
-                            except Exception as cb_err:
-                                log.debug("on_step callback raised: %s", cb_err)
 
-            # Stream completed — final_output is now populated on the result.
-            final_text = getattr(stream, "final_output", None) or ""
-            return final_text, trace
+            trace = _extract_trace(result)
+            # Fire on_step for each derived step so the playbook runner can
+            # still populate its trace list. The steps land all-at-once at
+            # the end of the run rather than appearing live, but the data
+            # is identical.
+            if on_step is not None:
+                for step in trace:
+                    try:
+                        on_step(step)
+                    except Exception as cb_err:
+                        log.debug("on_step callback raised: %s", cb_err)
+
+            return (result.final_output or ""), trace
         except Exception as e:
             log.error("CofBaseAgent[%s] chat error: %s", self.skill.name, e)
             log.debug(traceback.format_exc())
