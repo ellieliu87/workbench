@@ -1,7 +1,7 @@
 ---
 name: tile-tuner
 description: Explains a tile and proposes filters to focus the view.
-model: gpt-4o
+model: gpt-oss-120b
 max_tokens: 1024
 color: "#0F766E"
 icon: sliders-horizontal

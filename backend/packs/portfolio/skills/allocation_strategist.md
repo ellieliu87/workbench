@@ -1,7 +1,7 @@
 ---
 name: allocation-strategist
 description: Decides how new fixed-income purchase volume should split across MBS / CMBS / Treasuries given risk constraints and the trader's risk appetite.
-model: gpt-4o
+model: gpt-oss-120b
 max_tokens: 1024
 color: "#004977"
 icon: boxes

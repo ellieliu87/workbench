@@ -1,7 +1,7 @@
 ---
 name: orchestrator
 description: Master routing agent — classifies analyst intent and delegates to the right specialist sub-agent.
-model: gpt-4o
+model: gpt-oss-120b
 max_tokens: 1024
 color: "#004977"
 icon: cpu

@@ -1,7 +1,7 @@
 ---
 name: trade-advisor
 description: Synthesizes prior phases (gap analysis → screening → analytics) into a presentation-ready trade recommendation for the investment committee.
-model: gpt-4o
+model: gpt-oss-120b
 max_tokens: 1280
 color: "#D97706"
 icon: file-text

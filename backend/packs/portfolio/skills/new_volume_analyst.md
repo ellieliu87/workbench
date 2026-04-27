@@ -1,7 +1,7 @@
 ---
 name: new-volume-analyst
 description: Computes the 5-year purchase volume schedule needed to hit a strategic target balance against runoff and prepay decay.
-model: gpt-4o
+model: gpt-oss-120b
 max_tokens: 1024
 color: "#7C3AED"
 icon: line-chart

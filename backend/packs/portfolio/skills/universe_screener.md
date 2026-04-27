@@ -1,7 +1,7 @@
 ---
 name: universe-screener
 description: Screens an MBS pool universe with the Gap Analyst's criteria, ranks by composite Relative Value (RV) score, advances 3-5 candidates.
-model: gpt-4o
+model: gpt-oss-120b
 max_tokens: 1024
 color: "#059669"
 icon: line-chart

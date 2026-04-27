@@ -289,7 +289,7 @@ async def draft_tool(req: ToolDraftRequest, _: str = Depends(get_current_user)):
 
     try:
         completion = await client.chat.completions.create(
-            model=os.getenv("CMA_TOOL_DRAFT_MODEL", "gpt-4o"),
+            model=os.getenv("CMA_TOOL_DRAFT_MODEL", "gpt-oss-120b"),
             messages=[
                 {"role": "system", "content": _DRAFT_SYSTEM_PROMPT},
                 {"role": "user", "content": user_msg},

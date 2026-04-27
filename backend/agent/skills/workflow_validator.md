@@ -1,7 +1,7 @@
 ---
 name: workflow-validator
 description: Checks workflow design for missing inputs, name mismatches, cycles, and unwired destinations.
-model: gpt-4o
+model: gpt-oss-120b
 max_tokens: 1024
 color: "#D97706"
 icon: git-branch

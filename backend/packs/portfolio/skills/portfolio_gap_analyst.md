@@ -1,7 +1,7 @@
 ---
 name: portfolio-gap-analyst
 description: Analyzes the current portfolio's metrics, flags concentration / duration / yield gaps, and emits screening criteria for the next round of purchases.
-model: gpt-4o
+model: gpt-oss-120b
 max_tokens: 1024
 color: "#0891B2"
 icon: line-chart

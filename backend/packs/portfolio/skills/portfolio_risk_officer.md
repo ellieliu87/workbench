@@ -1,7 +1,7 @@
 ---
 name: portfolio-risk-officer
 description: Establishes risk guardrails — duration bounds, liquidity floors, concentration caps, convexity / ARM-reset flags — for the next round of purchases.
-model: gpt-4o
+model: gpt-oss-120b
 max_tokens: 1024
 color: "#DC2626"
 icon: shield-check

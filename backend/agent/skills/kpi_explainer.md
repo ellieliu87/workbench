@@ -1,7 +1,7 @@
 ---
 name: kpi-explainer
 description: Explains where a KPI card on the Overview tab comes from and what's driving it.
-model: gpt-4o
+model: gpt-oss-120b
 max_tokens: 800
 color: "#0891B2"
 icon: line-chart

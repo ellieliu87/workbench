@@ -1,7 +1,7 @@
 ---
 name: run-troubleshooter
 description: Diagnoses failed analytics runs and proposes specific fixes.
-model: gpt-4o
+model: gpt-oss-120b
 max_tokens: 1024
 color: "#DC2626"
 icon: alert-triangle

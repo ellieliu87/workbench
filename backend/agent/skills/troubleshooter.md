@@ -1,7 +1,7 @@
 ---
 name: troubleshooter
 description: Cross-tab error diagnosis — pattern-matches common UI / API errors.
-model: gpt-4o
+model: gpt-oss-120b
 max_tokens: 800
 color: "#FF5C5C"
 icon: life-buoy

@@ -1,7 +1,7 @@
 ---
 name: pool-analytics-specialist
 description: Runs deep-dive Monte Carlo analytics — OAS, Z-spread, OAD, convexity, CPR forecast, rate-shock sensitivity, portfolio impact — on a 3-5 pool shortlist.
-model: gpt-4o
+model: gpt-oss-120b
 max_tokens: 1280
 color: "#0F766E"
 icon: line-chart

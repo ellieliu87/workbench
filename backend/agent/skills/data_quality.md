@@ -1,7 +1,7 @@
 ---
 name: data-quality
 description: Profiles datasets and flags nulls, outliers, dtype drift, and other anomalies.
-model: gpt-4o
+model: gpt-oss-120b
 max_tokens: 1024
 color: "#059669"
 icon: shield-check

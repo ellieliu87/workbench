@@ -724,7 +724,7 @@ async def _draft(req: AnalyticDraftRequest) -> AnalyticDraftResponse:
         user += "\n\n[Available datasets]\n" + json.dumps(req.available_datasets, default=str)[:6000]
     try:
         completion = await client.chat.completions.create(
-            model=os.getenv("CMA_TOOL_DRAFT_MODEL", "gpt-4o"),
+            model=os.getenv("CMA_TOOL_DRAFT_MODEL", "gpt-oss-120b"),
             messages=[
                 {"role": "system", "content": _DRAFT_SYSTEM},
                 {"role": "user", "content": user},
@@ -833,7 +833,7 @@ async def _narrate(run: AnalyticDefinitionRun) -> str:
 
     try:
         completion = await client.chat.completions.create(
-            model=os.getenv("CMA_TOOL_DRAFT_MODEL", "gpt-4o"),
+            model=os.getenv("CMA_TOOL_DRAFT_MODEL", "gpt-oss-120b"),
             messages=[
                 {"role": "system", "content": _NARRATE_SYSTEM},
                 {"role": "user", "content": json.dumps(payload, default=str)[:8000]},

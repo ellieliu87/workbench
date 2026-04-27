@@ -1,7 +1,7 @@
 ---
 name: macro-economist
 description: Senior macroeconomist who explains the trends, regime, and risks in macro scenarios and historical macro time series.
-model: gpt-4o
+model: gpt-oss-120b
 max_tokens: 1024
 color: "#1D4ED8"
 icon: trending-up

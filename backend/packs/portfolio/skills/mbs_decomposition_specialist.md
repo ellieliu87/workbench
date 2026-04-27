@@ -1,7 +1,7 @@
 ---
 name: mbs-decomposition-specialist
 description: Breaks down the MBS allocation into rate-type / agency / term sub-buckets and produces an executable purchase schedule.
-model: gpt-4o
+model: gpt-oss-120b
 max_tokens: 1024
 color: "#7C3AED"
 icon: boxes

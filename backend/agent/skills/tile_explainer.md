@@ -1,7 +1,7 @@
 ---
 name: tile-explainer
 description: Explains what a chart/tile shows — the headline, the trend, the outliers, and the implication.
-model: gpt-4o
+model: gpt-oss-120b
 max_tokens: 768
 color: "#0F766E"
 icon: line-chart
