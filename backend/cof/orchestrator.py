@@ -1,9 +1,16 @@
 """COF AsyncOrchestrator — orchestrator agent + 7 specialist sub-agents.
 
-Connection priority (no mock fallback):
-  1. COF_BASE_URL set (Capital One company endpoint, no API key needed)
-  2. OPENAI_API_KEY set (direct OpenAI)
-  3. Otherwise: agent unavailable; chat returns a clear setup-required error.
+Connection model — matches the oasia pattern: ``AsyncOpenAI()`` is always
+constructed with **no arguments**. The openai SDK auto-resolves the endpoint
+and credentials from the standard env vars (``OPENAI_BASE_URL``,
+``OPENAI_API_KEY``) or from a Capital One COF SDK fork installed in the
+corporate proxy environment. We never force ``base_url=`` ourselves, because
+doing so can route around the corporate proxy in environments where it's
+preconfigured.
+
+If you're outside the corporate environment, set ``OPENAI_API_KEY`` (and
+optionally ``OPENAI_BASE_URL``) in ``backend/.env`` — the SDK picks them up
+automatically.
 
 Each specialist is a CofBaseAgent loaded from its own SKILL.md file. The
 orchestrator is itself a CofBaseAgent whose tools are `delegate_to_<name>`
@@ -96,21 +103,18 @@ class AsyncOrchestrator:
 
         if not HAS_AGENTS_SDK:
             self._error = (
-                "openai-agents SDK not installed. Run `pip install openai-agents` "
-                "and restart the backend."
+                "openai-agents SDK not installed. Run `uv sync` (or "
+                "`pip install openai-agents`) and restart the backend."
             )
             log.warning(self._error)
             return
 
-        if not (os.getenv("COF_BASE_URL") or os.getenv("OPENAI_API_KEY")):
-            self._error = (
-                "No LLM connection configured. Set either:\n"
-                "  - `COF_BASE_URL` (and optional `COF_API_KEY`) for the company endpoint, or\n"
-                "  - `OPENAI_API_KEY` for direct OpenAI access\n"
-                "in your shell or `backend/.env`, then restart the backend."
-            )
-            log.warning("No LLM credentials in env")
-            return
+        # Note: we DO NOT gate on env vars here — matching the oasia pattern.
+        # The corporate COF environment auto-resolves the endpoint + auth
+        # without any explicit env vars, so refusing to initialize when
+        # `COF_BASE_URL`/`OPENAI_API_KEY` are unset would defeat the proxy.
+        # If the SDK can't actually reach an LLM, individual chat calls will
+        # surface the failure with a clear message at request time.
 
         self._skills_mtime: float = 0.0
         self._reload_skills()
@@ -155,8 +159,7 @@ class AsyncOrchestrator:
 
     def _reload_skills(self) -> None:
         """Re-read every skill from disk; rebuild agents."""
-        from agents import Agent
-        from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
+        from agents import Agent, OpenAIChatCompletionsModel
         from openai import AsyncOpenAI
 
         self._skills: dict[str, AgentSkill] = {
@@ -185,17 +188,13 @@ class AsyncOrchestrator:
             self._orch_agent = None
             return
 
-        client_kwargs: dict[str, Any] = {}
-        cof_base = os.getenv("COF_BASE_URL")
-        if cof_base:
-            client_kwargs["base_url"] = cof_base
-            client_kwargs["api_key"] = os.getenv("COF_API_KEY", "cof-internal")
-        elif os.getenv("OPENAI_API_KEY"):
-            client_kwargs["api_key"] = os.getenv("OPENAI_API_KEY")
-
+        # Match oasia exactly: AsyncOpenAI() with no arguments. The openai
+        # SDK auto-discovers `OPENAI_BASE_URL` / `OPENAI_API_KEY` from the
+        # environment, and the COF proxy resolves transparently when the
+        # backend is running inside the corporate network.
         from agents import set_tracing_disabled
         set_tracing_disabled(True)
-        self._client = AsyncOpenAI(**client_kwargs)
+        self._client = AsyncOpenAI()
         self._orch_model = OpenAIChatCompletionsModel(
             model=orch_skill.model, openai_client=self._client,
         )

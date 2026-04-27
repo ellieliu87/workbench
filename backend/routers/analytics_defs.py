@@ -633,24 +633,14 @@ async def run_definition(def_id: str, _: str = Depends(get_current_user)):
 
 # ── Agent assist: draft + narrate ─────────────────────────────────────────
 def _llm_client():
-    cof_base = os.getenv("COF_BASE_URL")
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not (cof_base or api_key):
-        raise HTTPException(
-            status_code=503,
-            detail="LLM not configured. Set OPENAI_API_KEY or COF_BASE_URL in backend/.env and restart.",
-        )
+    """Match oasia: AsyncOpenAI() with no arguments. The SDK auto-resolves
+    OPENAI_BASE_URL / OPENAI_API_KEY from env; corporate COF proxy
+    environments preconfigure these transparently."""
     try:
         from openai import AsyncOpenAI
     except ImportError:
         raise HTTPException(status_code=503, detail="openai package not installed.")
-    kwargs: dict[str, Any] = {}
-    if cof_base:
-        kwargs["base_url"] = cof_base
-        kwargs["api_key"] = os.getenv("COF_API_KEY", "cof-internal")
-    else:
-        kwargs["api_key"] = api_key
-    return AsyncOpenAI(**kwargs)
+    return AsyncOpenAI()
 
 
 _DRAFT_SYSTEM = """You design self-serve analytics for a domain-agnostic

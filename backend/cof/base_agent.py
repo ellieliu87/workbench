@@ -1,12 +1,13 @@
 """COF async base agent — wraps a single AgentSkill via the openai-agents SDK.
 
-Mode resolution at construction time:
-  1. agents SDK + COF environment (no key required) → "agents_sdk"
-  2. agents SDK + OPENAI_API_KEY in env → "agents_sdk"
-  3. Neither available → mode = "unavailable", chat() raises a clear error
+Connection model — matches the oasia pattern: ``AsyncOpenAI()`` with no
+arguments. The SDK auto-discovers ``OPENAI_BASE_URL`` / ``OPENAI_API_KEY``
+from the environment, and the corporate COF proxy resolves transparently
+when running inside the company network. We never pass ``base_url=`` or a
+fake placeholder ``api_key=`` ourselves — that can defeat the proxy.
 
-There is NO mock fallback. If neither path is available, the chat router will
-return an error response telling the analyst to configure the connection.
+If the agents SDK is not installed, mode is "unavailable" and `chat()`
+raises a clear setup-required error.
 """
 from __future__ import annotations
 
@@ -21,8 +22,7 @@ from agent.skill_loader import AgentSkill
 log = logging.getLogger("cma.cof.base_agent")
 
 try:
-    from agents import Agent, Runner, FunctionTool, RunResult
-    from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
+    from agents import Agent, Runner, FunctionTool, RunResult, OpenAIChatCompletionsModel
     HAS_AGENTS_SDK = True
 except ImportError:
     HAS_AGENTS_SDK = False
@@ -234,22 +234,13 @@ class CofBaseAgent:
             allowed = set(skill.tools) if skill.tools else None
             self._function_tools = _filter_tools(openai_tools, allowed, tool_handler)
 
-            client_kwargs: dict[str, Any] = {}
-            cof_base = os.getenv("COF_BASE_URL")
-            cof_key  = os.getenv("COF_API_KEY")
-            api_key  = os.getenv("OPENAI_API_KEY")
-            if cof_base:
-                client_kwargs["base_url"] = cof_base
-                client_kwargs["api_key"] = cof_key or "cof-internal"
-            elif api_key:
-                client_kwargs["api_key"] = api_key
-            else:
-                # Bare AsyncOpenAI() — only works if running inside a COF environment
-                # where the SDK auto-resolves credentials. Otherwise the first chat call
-                # surfaces a 401 from the API and we report it.
-                pass
-
-            self._client = AsyncOpenAI(**client_kwargs)
+            # Match oasia: AsyncOpenAI() with no arguments. The SDK reads
+            # OPENAI_BASE_URL / OPENAI_API_KEY from the environment, and
+            # the corporate COF proxy resolves transparently inside the
+            # company network. Setting base_url= ourselves can route
+            # around the proxy and break in environments where the
+            # corporate SDK is preconfigured.
+            self._client = AsyncOpenAI()
             self._model = OpenAIChatCompletionsModel(
                 model=skill.model, openai_client=self._client,
             )

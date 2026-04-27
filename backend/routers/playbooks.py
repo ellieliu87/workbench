@@ -13,8 +13,9 @@ Run lifecycle (synchronous, request-driven):
 - POST /runs/{run_id}/publish → snapshots the final report into the function's
                                 Published Reports registry.
 
-If the orchestrator can't reach the LLM (no `OPENAI_API_KEY` / `COF_BASE_URL`),
-phases fail with a clear setup-required message — no mock fallback.
+If the orchestrator can't reach the LLM (the openai SDK couldn't resolve a
+backend at request time), phases fail with the upstream error surfaced —
+no mock fallback.
 """
 from __future__ import annotations
 
@@ -160,7 +161,7 @@ async def _execute_phase(
         pe.status = "failed"
         pe.error = (
             _ORCH.init_error
-            or "LLM not configured. Set OPENAI_API_KEY (or COF_BASE_URL) and restart the backend."
+            or "LLM not reachable. Inside the corporate environment, no env vars are needed. Outside it, set OPENAI_API_KEY in backend/.env."
         )
         completed = datetime.utcnow()
         pe.completed_at = completed.isoformat() + "Z"

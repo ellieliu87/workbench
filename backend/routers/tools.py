@@ -262,26 +262,15 @@ async def draft_tool(req: ToolDraftRequest, _: str = Depends(get_current_user)):
     Uses the same OpenAI/COF connection the orchestrator uses; if neither is
     configured, returns 503 with a setup-required message.
     """
-    cof_base = os.getenv("COF_BASE_URL")
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not (cof_base or api_key):
-        raise HTTPException(
-            status_code=503,
-            detail="LLM not configured. Set OPENAI_API_KEY or COF_BASE_URL in backend/.env and restart.",
-        )
-
     try:
         from openai import AsyncOpenAI
     except ImportError:
         raise HTTPException(status_code=503, detail="openai package not installed.")
 
-    client_kwargs: dict[str, Any] = {}
-    if cof_base:
-        client_kwargs["base_url"] = cof_base
-        client_kwargs["api_key"] = os.getenv("COF_API_KEY", "cof-internal")
-    else:
-        client_kwargs["api_key"] = api_key
-    client = AsyncOpenAI(**client_kwargs)
+    # Match oasia: AsyncOpenAI() with no arguments. The SDK auto-resolves
+    # OPENAI_BASE_URL / OPENAI_API_KEY from the environment; corporate COF
+    # proxy environments preconfigure these so no env vars need to be set.
+    client = AsyncOpenAI()
 
     user_msg = req.prompt.strip()
     if req.context:

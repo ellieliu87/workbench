@@ -1,11 +1,11 @@
 """Chat router — routes analyst queries to a real LLM-backed agent team.
 
-Connection priority:
-  1. `COF_BASE_URL` (+ optional `COF_API_KEY`) — Capital One company endpoint, no key in UI
-  2. `OPENAI_API_KEY` — direct OpenAI
-
-If neither is set, every chat call returns a clear setup-required message
-(NOT a mock). Set the env vars and restart the backend.
+Connection: the orchestrator constructs ``AsyncOpenAI()`` with no
+arguments and lets the SDK auto-resolve the endpoint from
+``OPENAI_BASE_URL`` / ``OPENAI_API_KEY`` (or the corporate COF SDK fork
+running inside the Capital One network — neither env var is needed
+there). When the SDK can't reach an LLM, every chat call surfaces the
+upstream error verbatim (NOT a mock).
 
 The backend pre-routes via the page context the frontend ships with each
 message (tab + entity_kind + entity_id) so we usually go straight to the right
@@ -132,7 +132,7 @@ async def send_message(req: ChatMessage, _: str = Depends(get_current_user)):
         return ChatResponse(
             response=(
                 "## LLM not configured\n\n"
-                f"{_ORCH.init_error or 'Set COF_BASE_URL or OPENAI_API_KEY in backend/.env and restart.'}"
+                f"{_ORCH.init_error or 'LLM not reachable. Inside the corporate environment, no env vars are needed. Outside it, set OPENAI_API_KEY in backend/.env and restart.'}"
             ),
             agent_id="setup_required",
             agent_name="Setup Required",
