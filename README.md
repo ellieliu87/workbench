@@ -142,33 +142,51 @@ filters every list endpoint, so a user in `["irr_team"]` won't see the
 
 ## Running locally
 
-### Backend
+### Backend (uv-managed)
+
+Dependencies live in `backend/pyproject.toml` and are pinned in
+`backend/uv.lock`. Install [uv](https://docs.astral.sh/uv/) once
+(`pip install uv` or `winget install astral-sh.uv`), then:
 
 ```bash
 cd backend
-python -m venv .venv
-# Windows: .\.venv\Scripts\activate
-# *nix:    source .venv/bin/activate
-pip install -r requirements.txt
 
-# Configure the LLM connection (one of these)
-cat > .env <<'EOF'
-OPENAI_API_KEY=sk-...
+# Create the .venv and install the locked dependency set (deterministic).
+uv sync
+
+# Configure the LLM connection (one of these). Do NOT paste keys in chat.
+cp .env.example .env
+# then edit backend/.env with your editor and set:
+#   OPENAI_API_KEY=sk-...
 # or, inside the company network:
-# COF_BASE_URL=https://...
-# COF_API_KEY=...
-EOF
+#   COF_BASE_URL=https://...
+#   COF_API_KEY=...
 
-python -m uvicorn main:app --port 8001 --host 127.0.0.1
+# Run the server in the uv-managed venv.
+uv run uvicorn main:app --port 8001 --host 127.0.0.1
 ```
 
 Backend serves on **http://127.0.0.1:8001** ; OpenAPI docs at `/docs`.
 
-> **Windows + OneDrive note:** `--reload` is unreliable when the backend
-> directory lives inside OneDrive — file-watcher events get dropped and
-> orphaned multiprocessing children can hold port 8001 after a parent
-> kill. Run without `--reload` and restart manually after edits, or move
-> the checkout outside OneDrive.
+Common uv commands:
+
+| Task                                | Command                              |
+|-------------------------------------|--------------------------------------|
+| Add a runtime dep                   | `uv add fastapi-something`           |
+| Add a dev-only dep                  | `uv add --dev pytest-asyncio`        |
+| Install optional ONNX support       | `uv sync --extra onnx`               |
+| Update everything to latest allowed | `uv lock --upgrade && uv sync`       |
+| Run any command in the venv        | `uv run <command>` (e.g. `uv run python -c "import agents; print(agents.__version__)"`) |
+| Drop into a venv-aware shell        | `.venv\Scripts\activate` (Windows)   |
+
+> **Windows + OneDrive notes:**
+> 1. `pyproject.toml` already sets `[tool.uv].link-mode = "copy"` because
+>    the OneDrive filesystem rejects uv's hardlink mode (Windows error 396).
+> 2. `--reload` is unreliable when the backend directory lives inside
+>    OneDrive — file-watcher events get dropped and orphaned
+>    multiprocessing children can hold port 8001 after a parent kill.
+>    Run without `--reload` and restart manually after edits, or move the
+>    checkout outside OneDrive.
 
 ### Frontend
 

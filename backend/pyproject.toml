@@ -1,0 +1,56 @@
+[project]
+name = "cma-workbench-backend"
+version = "0.1.0"
+description = "FastAPI backend for the CMA Workbench — multi-agent self-serve analytics platform."
+readme = { file = "../README.md", content-type = "text/markdown" }
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+authors = [{ name = "Capital Markets & Analytics" }]
+
+# ── Runtime dependencies ──────────────────────────────────────────────────
+# Keep this list curated — anything imported under backend/ should appear here
+# (or be a transitive dep of something that is). `uv lock` resolves everything.
+dependencies = [
+  # Web framework + ASGI server
+  "fastapi>=0.110.0",
+  "uvicorn[standard]>=0.29.0",
+  "python-multipart>=0.0.9",            # FastAPI file uploads
+  # Schema + config
+  "pydantic>=2.6.0",
+  "python-dotenv>=1.0.0",               # .env loading in main.py
+  # Dataframes + numerics
+  "pandas>=2.0.0",
+  "numpy>=1.26.0",
+  "pyarrow>=15.0.0",                    # parquet (pandas.read_parquet)
+  "openpyxl>=3.1.0",                    # xlsx (pandas.read_excel)
+  # ML / model artifacts
+  "scikit-learn>=1.4.0",                # in-app regression builder
+  "joblib>=1.3.0",                      # joblib model loads + introspection
+  # LLM / agents
+  "openai>=1.30.0",                     # AsyncOpenAI client (tool drafter etc.)
+  "openai-agents>=0.0.1",               # streaming orchestrator + agent SDK
+]
+
+# Optional groups — install only when needed.
+#   uv sync --extra onnx
+[project.optional-dependencies]
+onnx = [
+  "onnx>=1.16.0",                       # only used if you upload .onnx artifacts
+  "onnxruntime>=1.17.0",
+]
+
+# Dev tooling — install with: uv sync --group dev
+[dependency-groups]
+dev = [
+  "pytest>=8.0.0",
+  "httpx>=0.27.0",                      # for FastAPI test client
+  "ruff>=0.4.0",
+]
+
+# ── uv-specific config ────────────────────────────────────────────────────
+# Backend is a leaf project — no library publishing.
+[tool.uv]
+package = false
+# OneDrive-synced repos can't accept hardlinks from uv's cache (Windows
+# error 396). Forcing copy mode silences the warning + works on every host.
+link-mode = "copy"
