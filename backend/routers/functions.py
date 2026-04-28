@@ -1,10 +1,21 @@
 """Business functions router - lists the analytical domains analysts can choose from."""
+import re
+
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 
 from models.schemas import BusinessFunction
 from routers.auth import get_current_user
 
 router = APIRouter()
+
+
+def _slugify(name: str) -> str:
+    """Stable URL-friendly id from a function name."""
+    s = name.strip().lower()
+    s = re.sub(r"[^a-z0-9]+", "_", s)
+    s = re.sub(r"_+", "_", s).strip("_")
+    return s or "workspace"
 
 
 # Categories are inspired by Capital Markets & Analytics' real org topics
@@ -132,3 +143,47 @@ async def get_function(function_id: str, _: str = Depends(get_current_user)):
         if f.id == function_id:
             return f
     raise HTTPException(status_code=404, detail="Function not found")
+
+
+# ── Create a new workspace (in-memory; resets on backend restart) ──────────
+class BusinessFunctionCreate(BaseModel):
+    """Body for the new-workspace drawer. `id` is auto-derived from `name`
+    when not provided. `default_views` and `sample_metrics` come up empty —
+    a freshly-created workspace has no hardcoded content; analysts populate
+    it via the Reporting / Data / Models tabs."""
+    name: str = Field(min_length=2, max_length=80)
+    short_name: str | None = Field(default=None, max_length=40)
+    description: str = Field(default="", max_length=500)
+    category: str = Field(min_length=2, max_length=60)
+    icon: str = "briefcase"
+    color: str = "#004977"
+    id: str | None = None  # optional — defaults to slugify(name)
+
+
+@router.post("", response_model=BusinessFunction, status_code=201)
+async def create_function(
+    body: BusinessFunctionCreate,
+    _: str = Depends(get_current_user),
+):
+    fid = (body.id or _slugify(body.name)).strip()
+    if not fid:
+        raise HTTPException(status_code=400, detail="Could not derive a valid id from the name.")
+    if any(f.id == fid for f in BUSINESS_FUNCTIONS):
+        raise HTTPException(status_code=409, detail=f"A workspace with id '{fid}' already exists.")
+
+    short = (body.short_name or body.name).strip() or body.name
+    fn = BusinessFunction(
+        id=fid,
+        name=body.name.strip(),
+        short_name=short[:40],
+        description=body.description.strip(),
+        icon=body.icon or "briefcase",
+        color=body.color or "#004977",
+        category=body.category.strip(),
+        default_views=[],
+        sample_metrics=[],
+    )
+    BUSINESS_FUNCTIONS.append(fn)
+    if fn.category not in CATEGORY_ORDER:
+        CATEGORY_ORDER.append(fn.category)
+    return fn

@@ -39,14 +39,15 @@ export default function ScenariosSection({ functionId, functionName, onAskAgent 
   const [previewFor, setPreviewFor] = useState<Scenario | null>(null)
   const [bindOpen, setBindOpen] = useState(false)
 
-  // Scenarios route to the macro-economist agent (not data-quality), so we
-  // tag the chat context with the scenario entity before dispatching.
+  // Scenarios route to the macro-economist agent. We tag the chat context
+  // with the scenario entity before dispatching so the backend's _route()
+  // sees entity_kind="scenario" and skips the dataset/quality fallbacks.
   const explainScenario = (s: Scenario) => {
     setEntity('scenario', s.id)
     onAskAgent(
       `Explain the macro narrative in the "${s.name}" scenario — ` +
       `regime, rate path, credit/spreads, real economy, and key tail risks. ` +
-      `Skip data-quality and column commentary.`
+      `Focus on the scenario story, not column-level commentary.`
     )
   }
 

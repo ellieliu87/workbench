@@ -42,6 +42,20 @@ log = logging.getLogger("cma.chat")
 _ORCH = AsyncOrchestrator()
 
 
+_DATA_QUALITY_PHRASES = (
+    "data quality", "quality audit", "quality check",
+    "data audit", "outlier", "anomal", "missing values",
+    "null %", "dtype drift", "constant column", "data drift",
+)
+
+
+def _is_quality_intent(msg: str) -> bool:
+    """True only when the analyst explicitly asked for a quality check.
+    Substring 'quality' alone is too loose — phrases like 'skip
+    data-quality' inside an unrelated message would falsely trigger."""
+    return any(kw in msg for kw in _DATA_QUALITY_PHRASES)
+
+
 # ── Routing (frontend context → specialist agent_id) ─────────────────────
 def _route(req: ChatMessage) -> str:
     msg = (req.message or "").lower()
@@ -51,8 +65,18 @@ def _route(req: ChatMessage) -> str:
     if req.entity_kind == "kpi":
         return "kpi-explainer"
     if req.entity_kind == "dataset":
-        return "data-quality"
+        # data-quality is reserved for the explicit "Check data quality"
+        # button. The Sparkles "Explain dataset" icon should describe
+        # what's in the dataset — that's the dedicated `data-explainer`
+        # specialist, which only calls `get_dataset_preview` and writes a
+        # structured shape/columns/use-cases brief.
+        if _is_quality_intent(msg):
+            return "data-quality"
+        return "data-explainer"
     if req.entity_kind == "scenario":
+        # Scenarios always go to the macro narrative writer — never to
+        # data-quality, even if the message text mentions data-quality
+        # in passing.
         return "macro-economist"
     if req.entity_kind == "model":
         return "model-explainer"
@@ -74,7 +98,7 @@ def _route(req: ChatMessage) -> str:
         return "plot-tuner"
     if req.entity_kind == "workflow":
         return "workflow-validator"
-    if req.tab == "data" and any(k in msg for k in ("quality", "anomal", "outlier", "null")):
+    if req.tab == "data" and _is_quality_intent(msg):
         return "data-quality"
     if req.tab == "models" and "explain" in msg:
         return "model-explainer"

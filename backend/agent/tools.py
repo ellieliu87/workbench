@@ -58,6 +58,22 @@ def _ctx_tile_id() -> str:
     return eid if kind == "tile" else ""
 
 
+def _ctx_id_for(expected_kind: str) -> str:
+    """Generic single-id fallback for a specific entity kind. Returns the
+    request's bound entity_id only when its kind matches. Used by lookup
+    tools (get_dataset_preview, profile_dataset, get_model, …) so the
+    model can omit / mistype the id and the tool still hits the right
+    object that the analyst was looking at when they sent the message."""
+    ctx = _REQUEST_CTX.get() or {}
+    kind = ctx.get("entity_kind")
+    eid = ctx.get("entity_id")
+    return eid if kind == expected_kind and eid else ""
+
+
+def _ctx_function_id() -> str:
+    return (_REQUEST_CTX.get() or {}).get("function_id") or ""
+
+
 # OpenAI-format tool schemas — these are advertised to the LLM
 OPENAI_TOOLS: list[dict[str, Any]] = [
     {
@@ -340,7 +356,7 @@ OPENAI_TOOLS: list[dict[str, Any]] = [
 
 # ── Implementations ───────────────────────────────────────────────────────
 def _t_get_workspace(args: dict) -> str:
-    fid = args.get("function_id", "")
+    fid = args.get("function_id", "") or _ctx_function_id()
     ws = get_workspace(fid)
     if not ws:
         return json.dumps({"error": f"No workspace for function `{fid}`"})
@@ -349,13 +365,13 @@ def _t_get_workspace(args: dict) -> str:
 
 def _t_get_function_meta(args: dict) -> str:
     from routers.functions import BUSINESS_FUNCTIONS
-    fid = args.get("function_id", "")
+    fid = args.get("function_id", "") or _ctx_function_id()
     f = next((x for x in BUSINESS_FUNCTIONS if x.id == fid), None)
     return f.model_dump_json(indent=2) if f else json.dumps({"error": f"Unknown function `{fid}`"})
 
 
 def _t_profile_dataset(args: dict) -> str:
-    did = args.get("dataset_id", "")
+    did = args.get("dataset_id", "") or _ctx_id_for("dataset")
     d = _DATASETS.get(did)
     if not d:
         return json.dumps({"error": f"Dataset `{did}` not found"})
@@ -406,7 +422,7 @@ def _t_profile_dataset(args: dict) -> str:
 
 
 def _t_get_dataset_preview(args: dict) -> str:
-    did = args.get("dataset_id", "")
+    did = args.get("dataset_id", "") or _ctx_id_for("dataset")
     n = int(args.get("n", 25))
     d = _DATASETS.get(did)
     if not d:
@@ -415,6 +431,7 @@ def _t_get_dataset_preview(args: dict) -> str:
     if df is None:
         return json.dumps({"error": "Read failed"})
     return json.dumps({
+        "dataset_id": d.id,
         "name": d.name,
         "columns": [{"name": c, "dtype": str(df[c].dtype)} for c in df.columns],
         "rows": _df_records(df, n),
@@ -422,13 +439,13 @@ def _t_get_dataset_preview(args: dict) -> str:
 
 
 def _t_get_model(args: dict) -> str:
-    mid = args.get("model_id", "")
+    mid = args.get("model_id", "") or _ctx_id_for("model")
     m = _MODELS.get(mid)
     return m.model_dump_json(indent=2) if m else json.dumps({"error": f"Model `{mid}` not found"})
 
 
 def _t_get_model_metrics(args: dict) -> str:
-    mid = args.get("model_id", "")
+    mid = args.get("model_id", "") or _ctx_id_for("model")
     m = _MODELS.get(mid)
     if not m:
         return json.dumps({"error": f"Model `{mid}` not found"})
@@ -467,7 +484,7 @@ def _t_validate_workflow(args: dict) -> str:
 
 
 def _t_get_run(args: dict) -> str:
-    rid = args.get("run_id", "")
+    rid = args.get("run_id", "") or _ctx_id_for("run")
     r = _RUNS.get(rid)
     return r.model_dump_json(indent=2) if r else json.dumps({"error": f"Run `{rid}` not found"})
 
