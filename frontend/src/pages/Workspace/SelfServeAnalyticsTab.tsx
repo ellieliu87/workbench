@@ -963,20 +963,57 @@ function CompareEditor({
   onChange: (s: CompareSpec) => void
 }) {
   const dsA = datasets.find((x) => x.id === dataset_id)
-  const cols = dsA ? dsA.columns.map((c) => c.name) : []
+  const dsB = datasets.find((x) => x.id === dataset_id_b)
+  const colsA = dsA ? dsA.columns.map((c) => c.name) : []
+  const colsB = dsB ? dsB.columns.map((c) => c.name) : []
+  // Compare runs the same group_by + measure on BOTH datasets and joins the
+  // results, so every column referenced by the spec must exist in both. The
+  // editor restricts pickers to that intersection so users can't construct
+  // an invalid spec, and surfaces the A-only / B-only columns as a hint.
+  const setA = new Set(colsA)
+  const setB = new Set(colsB)
+  const cols = colsA.filter((c) => setB.has(c))
+  const onlyA = colsA.filter((c) => !setB.has(c))
+  const onlyB = colsB.filter((c) => !setA.has(c))
+  const bothPicked = !!(dsA && dsB) && dsA.id !== dsB.id
+
   return (
     <div className="space-y-3">
       <div className="grid grid-cols-2 gap-2">
         <DatasetPicker value={dataset_id} datasets={datasets} onChange={onChangeA} label="Dataset A" />
         <DatasetPicker value={dataset_id_b} datasets={datasets} onChange={onChangeB} label="Dataset B" />
       </div>
+
+      {bothPicked && (onlyA.length > 0 || onlyB.length > 0) && (
+        <div
+          className="text-[11px] rounded-md px-3 py-2"
+          style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}
+        >
+          <div className="mb-1">
+            <strong>{cols.length}</strong> column{cols.length === 1 ? '' : 's'} common to both — Compare can only use these.
+          </div>
+          {onlyA.length > 0 && (
+            <div style={{ color: 'var(--text-muted)' }}>
+              Only in <strong>A ({dsA!.name})</strong>: <span className="font-mono">{onlyA.join(', ')}</span>
+            </div>
+          )}
+          {onlyB.length > 0 && (
+            <div style={{ color: 'var(--text-muted)' }}>
+              Only in <strong>B ({dsB!.name})</strong>: <span className="font-mono">{onlyB.join(', ')}</span>
+            </div>
+          )}
+        </div>
+      )}
+
       <div className="grid grid-cols-2 gap-2">
         <Field label="Label A"><input className="input" value={spec.label_a} onChange={(e) => onChange({ ...spec, label_a: e.target.value })} /></Field>
         <Field label="Label B"><input className="input" value={spec.label_b} onChange={(e) => onChange({ ...spec, label_b: e.target.value })} /></Field>
       </div>
-      <Field label="Group by"><MultiSelect options={cols} value={spec.group_by} onChange={(v) => onChange({ ...spec, group_by: v })} placeholder="Dimensions…" /></Field>
+      <Field label="Group by" hint={bothPicked ? 'common columns only' : ''}>
+        <MultiSelect options={cols} value={spec.group_by} onChange={(v) => onChange({ ...spec, group_by: v })} placeholder={bothPicked ? 'Dimensions…' : 'Pick A and B first'} />
+      </Field>
       <div className="rounded-lg p-2" style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border)' }}>
-        <div className="text-[11px] font-semibold uppercase tracking-widest mb-1" style={{ color: 'var(--text-secondary)' }}>Measure</div>
+        <div className="text-[11px] font-semibold uppercase tracking-widest mb-1" style={{ color: 'var(--text-secondary)' }}>Measure (common columns only)</div>
         <div className="grid grid-cols-12 gap-2 items-center">
           <select className="input col-span-3" value={spec.measure.column} onChange={(e) => onChange({ ...spec, measure: { ...spec.measure, column: e.target.value } })}>
             <option value="">column…</option>

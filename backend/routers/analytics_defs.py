@@ -282,6 +282,42 @@ def _run_compare(d: AnalyticDefinition) -> AnalyticResult:
     df_a = _df_for_dataset(d.inputs.dataset_id)
     df_b = _df_for_dataset(d.inputs.dataset_id_b)
     spec = d.compare_spec
+
+    # Pre-flight: every column referenced by the Compare spec must exist
+    # in BOTH datasets, otherwise we'd surface a vague "column not in
+    # dataset" error from the aggregate runner without saying which side
+    # is missing it.
+    cols_a = set(df_a.columns)
+    cols_b = set(df_b.columns)
+    referenced: list[tuple[str, str]] = []  # (column_name, role)
+    for c in spec.group_by:
+        referenced.append((c, "group_by"))
+    if spec.measure.column:
+        referenced.append((spec.measure.column, "measure"))
+    if spec.measure.weight_by:
+        referenced.append((spec.measure.weight_by, "weight_by"))
+
+    missing_lines = []
+    for col, role in referenced:
+        miss_a = col not in cols_a
+        miss_b = col not in cols_b
+        if miss_a and miss_b:
+            missing_lines.append(f"  - {role} {col!r}: not in either dataset")
+        elif miss_a:
+            missing_lines.append(f"  - {role} {col!r}: missing from Dataset A")
+        elif miss_b:
+            missing_lines.append(f"  - {role} {col!r}: missing from Dataset B")
+    if missing_lines:
+        common = sorted(cols_a & cols_b)
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Compare spec references columns that aren't in both datasets:\n"
+                + "\n".join(missing_lines)
+                + f"\n\nColumns common to both datasets:\n  {', '.join(common) if common else '(none)'}"
+            ),
+        )
+
     inner = AggregateSpec(
         group_by=spec.group_by,
         measures=[spec.measure],
