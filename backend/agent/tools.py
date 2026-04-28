@@ -185,6 +185,121 @@ OPENAI_TOOLS: list[dict[str, Any]] = [
             },
         },
     },
+    # ── Plot Tuner mutation tools ─────────────────────────────────────────
+    # These work on either a Reporting tile (`target_kind="tile"`,
+    # `target_id=<plot_id>`) or an Analytics definition
+    # (`target_kind="analytic_def"`, `target_id=<adef_id>`). Each mutates the
+    # persisted spec so the next render reflects the change.
+    {
+        "type": "function",
+        "function": {
+            "name": "apply_filter",
+            "description": "Filter the data underlying a plot or table. Adds one filter row; multiple calls compose AND.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target_kind": {"type": "string", "enum": ["tile", "analytic_def"]},
+                    "target_id": {"type": "string"},
+                    "field": {"type": "string"},
+                    "op": {"type": "string", "enum": ["eq", "ne", "gt", "gte", "lt", "lte", "in", "contains"]},
+                    "value": {
+                        "description": "Filter value — string, number, boolean, or list of strings/numbers.",
+                        "anyOf": [
+                            {"type": "string"}, {"type": "number"}, {"type": "boolean"},
+                            {"type": "array", "items": {"anyOf": [{"type": "string"}, {"type": "number"}]}},
+                        ],
+                    },
+                },
+                "required": ["target_kind", "target_id", "field", "op", "value"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_sort",
+            "description": "Sort the rendered rows by a field. desc=true is descending. Pass field='' to clear sort.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target_kind": {"type": "string", "enum": ["tile", "analytic_def"]},
+                    "target_id": {"type": "string"},
+                    "field": {"type": "string"},
+                    "desc": {"type": "boolean"},
+                },
+                "required": ["target_kind", "target_id", "field", "desc"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_chart_type",
+            "description": "Switch the chart between bar, line, area, stacked_bar, scatter, pie, table, kpi.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target_kind": {"type": "string", "enum": ["tile", "analytic_def"]},
+                    "target_id": {"type": "string"},
+                    "chart_type": {"type": "string", "enum": ["bar", "line", "area", "stacked_bar", "scatter", "pie", "table", "kpi"]},
+                },
+                "required": ["target_kind", "target_id", "chart_type"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_axes",
+            "description": "Pick which field goes on the X axis and which fields are the Y series. Use to add/remove series.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target_kind": {"type": "string", "enum": ["tile", "analytic_def"]},
+                    "target_id": {"type": "string"},
+                    "x_field": {"type": "string"},
+                    "y_fields": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["target_kind", "target_id", "x_field", "y_fields"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_axis_labels",
+            "description": "Override the chart title and axis labels. Pass empty strings to revert to the auto-derived values.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target_kind": {"type": "string", "enum": ["tile", "analytic_def"]},
+                    "target_id": {"type": "string"},
+                    "title": {"type": "string"},
+                    "x_axis_label": {"type": "string"},
+                    "y_axis_label": {"type": "string"},
+                },
+                "required": ["target_kind", "target_id", "title", "x_axis_label", "y_axis_label"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_style",
+            "description": "Change visual style — color palette (hex codes in series order), legend position, font size in pixels.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target_kind": {"type": "string", "enum": ["tile", "analytic_def"]},
+                    "target_id": {"type": "string"},
+                    "palette": {"type": "array", "items": {"type": "string"}, "description": "Hex color list (e.g. ['#0891B2','#7C3AED']). Empty list reverts to default."},
+                    "font_size": {"type": "integer", "description": "Pixel size for axis labels + legend. 0 reverts to default."},
+                    "legend_position": {"type": "string", "enum": ["top", "bottom", "right", "left", "none"]},
+                },
+                "required": ["target_kind", "target_id", "palette", "font_size", "legend_position"],
+            },
+        },
+    },
 ]
 
 
@@ -358,6 +473,134 @@ def _t_apply_tile_filter(args: dict) -> str:
     return json.dumps({"ok": True, "filters": p.filters})
 
 
+# ── Plot-tuner mutation tools (work on tile OR analytic_def) ─────────────
+def _resolve_target(args: dict):
+    """Return (kind, obj, owner_dict) for whichever registry holds the target.
+    Returns (kind, None, None) if not found."""
+    kind = args.get("target_kind", "")
+    tid = args.get("target_id", "")
+    if kind == "tile":
+        return ("tile", _PLOTS.get(tid), _PLOTS)
+    if kind == "analytic_def":
+        from routers.analytics_defs import _DEFS as _ADEFS
+        return ("analytic_def", _ADEFS.get(tid), _ADEFS)
+    return (kind, None, None)
+
+
+def _ensure_style(obj):
+    """Lazy-init `obj.style` to a PlotStyle if missing — back-compat with
+    saved specs from before the field was added."""
+    from models.schemas import PlotStyle
+    if getattr(obj, "style", None) is None:
+        obj.style = PlotStyle()
+    return obj.style
+
+
+def _t_apply_filter(args: dict) -> str:
+    kind, obj, _ = _resolve_target(args)
+    if obj is None:
+        return json.dumps({"error": f"{kind} `{args.get('target_id')}` not found"})
+    new_filter = {"field": args.get("field"), "op": args.get("op"), "value": args.get("value")}
+    if kind == "tile":
+        obj.filters = list(obj.filters) + [new_filter]
+        return json.dumps({"ok": True, "kind": kind, "filters": obj.filters})
+    if kind == "analytic_def" and obj.kind == "aggregate" and obj.aggregate_spec:
+        obj.aggregate_spec.filters = list(obj.aggregate_spec.filters) + [new_filter]
+        return json.dumps({"ok": True, "kind": kind, "filters": obj.aggregate_spec.filters})
+    return json.dumps({"error": f"Filters not supported on {kind}/{obj.kind}"})
+
+
+def _t_set_sort(args: dict) -> str:
+    kind, obj, _ = _resolve_target(args)
+    if obj is None:
+        return json.dumps({"error": f"{kind} `{args.get('target_id')}` not found"})
+    field = args.get("field", "") or None
+    desc = bool(args.get("desc"))
+    if kind == "tile":
+        # Tiles store table sort separately; apply to style for both plots + tables.
+        obj.table_default_sort = field
+        obj.table_default_sort_desc = desc
+    if kind == "analytic_def" and obj.kind == "aggregate" and obj.aggregate_spec:
+        obj.aggregate_spec.sort_by = field
+        obj.aggregate_spec.sort_desc = desc
+    style = _ensure_style(obj)
+    style.sort_field = field
+    style.sort_desc = desc
+    return json.dumps({"ok": True, "kind": kind, "sort_field": field, "sort_desc": desc})
+
+
+def _t_set_chart_type(args: dict) -> str:
+    kind, obj, _ = _resolve_target(args)
+    if obj is None:
+        return json.dumps({"error": f"{kind} `{args.get('target_id')}` not found"})
+    new_type = args.get("chart_type", "")
+    if kind == "tile":
+        # PlotConfig restricts chart_type to a smaller enum; KPI/table maps to tile_type
+        if new_type in ("table",):
+            obj.tile_type = "table"
+        else:
+            obj.tile_type = "plot"
+            obj.chart_type = new_type if new_type in (
+                "line", "bar", "area", "pie", "scatter", "stacked_bar"
+            ) else obj.chart_type
+        return json.dumps({"ok": True, "kind": kind, "chart_type": obj.chart_type, "tile_type": obj.tile_type})
+    if kind == "analytic_def" and obj.output:
+        obj.output.chart_type = new_type
+        return json.dumps({"ok": True, "kind": kind, "chart_type": obj.output.chart_type})
+    return json.dumps({"error": f"Cannot set chart_type on {kind}"})
+
+
+def _t_set_axes(args: dict) -> str:
+    kind, obj, _ = _resolve_target(args)
+    if obj is None:
+        return json.dumps({"error": f"{kind} `{args.get('target_id')}` not found"})
+    x = args.get("x_field", "")
+    ys = args.get("y_fields", []) or []
+    if kind == "tile":
+        obj.x_field = x or obj.x_field
+        obj.y_fields = list(ys) if ys else obj.y_fields
+        return json.dumps({"ok": True, "kind": kind, "x_field": obj.x_field, "y_fields": obj.y_fields})
+    if kind == "analytic_def" and obj.output:
+        obj.output.x_field = x or obj.output.x_field
+        obj.output.y_fields = list(ys) if ys else obj.output.y_fields
+        return json.dumps({"ok": True, "kind": kind, "x_field": obj.output.x_field, "y_fields": obj.output.y_fields})
+    return json.dumps({"error": f"Cannot set axes on {kind}"})
+
+
+def _t_set_axis_labels(args: dict) -> str:
+    kind, obj, _ = _resolve_target(args)
+    if obj is None:
+        return json.dumps({"error": f"{kind} `{args.get('target_id')}` not found"})
+    style = _ensure_style(obj)
+    title = args.get("title")
+    xl = args.get("x_axis_label")
+    yl = args.get("y_axis_label")
+    # Empty string explicitly clears (reverts to auto-derived).
+    style.title = title if title else None
+    style.x_axis_label = xl if xl else None
+    style.y_axis_label = yl if yl else None
+    return json.dumps({"ok": True, "kind": kind, "title": style.title,
+                       "x_axis_label": style.x_axis_label, "y_axis_label": style.y_axis_label})
+
+
+def _t_set_style(args: dict) -> str:
+    kind, obj, _ = _resolve_target(args)
+    if obj is None:
+        return json.dumps({"error": f"{kind} `{args.get('target_id')}` not found"})
+    style = _ensure_style(obj)
+    palette = args.get("palette") or []
+    font_size = args.get("font_size") or 0
+    legend = args.get("legend_position", "")
+    style.palette = list(palette) if palette else []
+    style.font_size = int(font_size) if font_size and font_size > 0 else None
+    if legend in ("top", "bottom", "right", "left", "none"):
+        style.legend_position = legend
+    return json.dumps({"ok": True, "kind": kind,
+                       "palette": style.palette,
+                       "font_size": style.font_size,
+                       "legend_position": style.legend_position})
+
+
 # ── Handler ───────────────────────────────────────────────────────────────
 _HANDLERS = {
     "get_workspace":      _t_get_workspace,
@@ -371,6 +614,13 @@ _HANDLERS = {
     "get_tile":           _t_get_tile,
     "get_tile_preview":   _t_get_tile_preview,
     "apply_tile_filter":  _t_apply_tile_filter,
+    # Plot-tuner mutation tools — work on tiles OR analytic-def specs
+    "apply_filter":       _t_apply_filter,
+    "set_sort":           _t_set_sort,
+    "set_chart_type":     _t_set_chart_type,
+    "set_axes":           _t_set_axes,
+    "set_axis_labels":    _t_set_axis_labels,
+    "set_style":          _t_set_style,
 }
 
 

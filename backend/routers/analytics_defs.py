@@ -32,6 +32,7 @@ import pandas as pd
 import numpy as np
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from cof.llm_config import resolve_model
 from models.schemas import (
     AggregateMeasure,
     AggregateSpec,
@@ -508,7 +509,10 @@ def _result_from_df(df: pd.DataFrame, output: AnalyticOutput) -> AnalyticResult:
                             v = float(v) if not np.isnan(v) else None
                         rec[yf] = v
                 data.append(rec)
-            chart = AnalyticResultChart(type=output.chart_type, x_field=x, y_fields=y, data=data)
+            chart = AnalyticResultChart(
+                type=output.chart_type, x_field=x, y_fields=y, data=data,
+                style=output.style,  # carry the style overlay to the renderer
+            )
     return AnalyticResult(table=table, chart=chart, kpis=kpis)
 
 
@@ -750,7 +754,7 @@ async def _draft(req: AnalyticDraftRequest) -> AnalyticDraftResponse:
         user += "\n\n[Available datasets]\n" + json.dumps(req.available_datasets, default=str)[:6000]
     try:
         completion = await client.chat.completions.create(
-            model=os.getenv("CMA_TOOL_DRAFT_MODEL", "gpt-oss-120b"),
+            model=resolve_model(os.getenv("CMA_TOOL_DRAFT_MODEL")),
             messages=[
                 {"role": "system", "content": _DRAFT_SYSTEM},
                 {"role": "user", "content": user},
@@ -859,7 +863,7 @@ async def _narrate(run: AnalyticDefinitionRun) -> str:
 
     try:
         completion = await client.chat.completions.create(
-            model=os.getenv("CMA_TOOL_DRAFT_MODEL", "gpt-oss-120b"),
+            model=resolve_model(os.getenv("CMA_TOOL_DRAFT_MODEL")),
             messages=[
                 {"role": "system", "content": _NARRATE_SYSTEM},
                 {"role": "user", "content": json.dumps(payload, default=str)[:8000]},

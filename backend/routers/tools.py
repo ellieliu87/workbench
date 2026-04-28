@@ -18,6 +18,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from cof.llm_config import resolve_model
 from models.schemas import (
     PythonTool,
     PythonToolCreate,
@@ -278,7 +279,7 @@ async def draft_tool(req: ToolDraftRequest, _: str = Depends(get_current_user)):
 
     try:
         completion = await client.chat.completions.create(
-            model=os.getenv("CMA_TOOL_DRAFT_MODEL", "gpt-oss-120b"),
+            model=resolve_model(os.getenv("CMA_TOOL_DRAFT_MODEL")),
             messages=[
                 {"role": "system", "content": _DRAFT_SYSTEM_PROMPT},
                 {"role": "user", "content": user_msg},

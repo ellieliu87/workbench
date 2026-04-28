@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   Send, Sparkles, X, Cpu, LineChart, ShieldCheck, Boxes, GitBranch,
-  AlertTriangle, SlidersHorizontal, LifeBuoy, Filter,
+  AlertTriangle, SlidersHorizontal, LifeBuoy, Filter, Trash2,
 } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -133,6 +133,7 @@ export default function ChatPanel({ open, onClose }: ChatPanelProps) {
   const payload = useChatStore((s) => s.payload)
   const addMessage = useChatStore((s) => s.addMessage)
   const setLoading = useChatStore((s) => s.setLoading)
+  const clearMessages = useChatStore((s) => s.clearMessages)
 
   const [input, setInput] = useState('')
   const [panelWidth, setPanelWidth] = useState(400)
@@ -183,6 +184,12 @@ export default function ChatPanel({ open, onClose }: ChatPanelProps) {
     setLoading(true)
     try {
       const ctxBundle = snap.pageContext ? `[Context: ${snap.pageContext}]\n\n${content}` : content
+      // Ship the last 10 prior turns so the agent can resolve back-references
+      // like "the pie chart you suggested". `snap` was captured before the
+      // user message was appended, so snap.messages already excludes it.
+      const history = snap.messages
+        .slice(-10)
+        .map((m) => ({ role: m.role, content: m.content }))
       const res = await api.post('/api/chat/message', {
         message: ctxBundle,
         function_id: snap.functionId,
@@ -191,6 +198,7 @@ export default function ChatPanel({ open, onClose }: ChatPanelProps) {
         entity_kind: snap.entityKind,
         entity_id: snap.entityId,
         payload: snap.payload,
+        history,
       })
       addMessage({
         role: 'assistant',
@@ -201,7 +209,23 @@ export default function ChatPanel({ open, onClose }: ChatPanelProps) {
         agent_color: res.data.agent_color,
         agent_icon: res.data.agent_icon,
         actions: res.data.actions || [],
-      })
+        trace: res.data.trace || [],
+      } as any)
+      // If the plot-tuner mutated a tile or analytic-def, broadcast a
+      // refresh event so the open card re-fetches its spec/preview.
+      const trace: any[] = res.data.trace || []
+      const mutated = trace.some((s) => s.kind === 'tool_call' && [
+        'apply_filter', 'set_sort', 'set_chart_type', 'set_axes',
+        'set_axis_labels', 'set_style', 'apply_tile_filter',
+      ].includes(s.tool_name))
+      if (mutated) {
+        if (snap.entityKind === 'tile' && snap.entityId) {
+          window.dispatchEvent(new CustomEvent('cma-tile-updated', { detail: { plot_id: snap.entityId } }))
+        }
+        if (snap.entityKind === 'analytic_def' && snap.entityId) {
+          window.dispatchEvent(new CustomEvent('cma-analytic-updated', { detail: { definition_id: snap.entityId } }))
+        }
+      }
     } catch (err: any) {
       const detail = err?.response?.data?.detail
       const status = err?.response?.status
@@ -319,23 +343,51 @@ export default function ChatPanel({ open, onClose }: ChatPanelProps) {
               </div>
             </div>
           </div>
-          <button
-            onClick={onClose}
-            className="p-1.5 rounded-lg transition-colors"
-            style={{ color: 'rgba(255,255,255,0.75)' }}
-            onMouseEnter={(e) => {
-              const el = e.currentTarget as HTMLElement
-              el.style.background = 'rgba(255,255,255,0.15)'
-              el.style.color = '#fff'
-            }}
-            onMouseLeave={(e) => {
-              const el = e.currentTarget as HTMLElement
-              el.style.background = 'transparent'
-              el.style.color = 'rgba(255,255,255,0.75)'
-            }}
-          >
-            <X size={15} />
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => {
+                if (messages.length === 0) return
+                if (window.confirm('Clear the entire chat thread? This cannot be undone.')) {
+                  clearMessages()
+                }
+              }}
+              disabled={messages.length === 0}
+              title="Clear chat"
+              className="p-1.5 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-default"
+              style={{ color: 'rgba(255,255,255,0.75)' }}
+              onMouseEnter={(e) => {
+                if (messages.length === 0) return
+                const el = e.currentTarget as HTMLElement
+                el.style.background = 'rgba(255,255,255,0.15)'
+                el.style.color = '#fff'
+              }}
+              onMouseLeave={(e) => {
+                const el = e.currentTarget as HTMLElement
+                el.style.background = 'transparent'
+                el.style.color = 'rgba(255,255,255,0.75)'
+              }}
+            >
+              <Trash2 size={14} />
+            </button>
+            <button
+              onClick={onClose}
+              title="Close"
+              className="p-1.5 rounded-lg transition-colors"
+              style={{ color: 'rgba(255,255,255,0.75)' }}
+              onMouseEnter={(e) => {
+                const el = e.currentTarget as HTMLElement
+                el.style.background = 'rgba(255,255,255,0.15)'
+                el.style.color = '#fff'
+              }}
+              onMouseLeave={(e) => {
+                const el = e.currentTarget as HTMLElement
+                el.style.background = 'transparent'
+                el.style.color = 'rgba(255,255,255,0.75)'
+              }}
+            >
+              <X size={15} />
+            </button>
+          </div>
         </div>
           )
         })()}
@@ -455,6 +507,66 @@ export default function ChatPanel({ open, onClose }: ChatPanelProps) {
                           {msg.content}
                         </ReactMarkdown>
                       </div>
+                      {msg.trace && msg.trace.length > 0 && (() => {
+                        // Pair each tool_call with its tool_output (if present)
+                        // so we can render a single ✓-line per actioned step.
+                        // Pure-explanation message_only traces are skipped.
+                        const calls = msg.trace.filter((s) => s.kind === 'tool_call')
+                        const outputs = msg.trace.filter((s) => s.kind === 'tool_output')
+                        if (calls.length === 0) return null
+                        const outByName = new Map<string, typeof outputs[number]>()
+                        for (const o of outputs) if (o.tool_name) outByName.set(o.tool_name, o)
+                        return (
+                          <div
+                            className="mt-2 pt-2"
+                            style={{ borderTop: '1px solid var(--border-subtle)' }}
+                          >
+                            <div className="text-[10px] uppercase tracking-widest mb-1" style={{ color: 'var(--text-muted)' }}>
+                              Steps taken ({calls.length})
+                            </div>
+                            <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+                              {calls.map((c, i) => {
+                                const out = c.tool_name ? outByName.get(c.tool_name) : undefined
+                                const errored = !!(out?.detail && out.detail.includes('"error"'))
+                                return (
+                                  <li
+                                    key={i}
+                                    className="flex items-start gap-1.5"
+                                    style={{
+                                      fontSize: 11,
+                                      color: errored ? 'var(--error)' : 'var(--text-secondary)',
+                                      textDecoration: errored ? 'none' : 'line-through',
+                                      textDecorationColor: 'var(--text-muted)',
+                                      opacity: errored ? 1 : 0.85,
+                                      marginBottom: 2,
+                                    }}
+                                  >
+                                    <span style={{ color: errored ? 'var(--error)' : 'var(--success)' }}>
+                                      {errored ? '✕' : '✓'}
+                                    </span>
+                                    <span className="font-mono">{c.tool_name}</span>
+                                    {!errored && c.detail && (
+                                      <span style={{ color: 'var(--text-muted)', textDecoration: 'none', display: 'inline' }}>
+                                        — {(() => {
+                                          try {
+                                            const args = JSON.parse(c.detail)
+                                            return Object.entries(args)
+                                              .filter(([k]) => k !== 'target_id' && k !== 'target_kind')
+                                              .map(([k, v]) => `${k}: ${typeof v === 'object' ? JSON.stringify(v) : v}`)
+                                              .join(', ')
+                                          } catch {
+                                            return c.detail.slice(0, 80)
+                                          }
+                                        })()}
+                                      </span>
+                                    )}
+                                  </li>
+                                )
+                              })}
+                            </ul>
+                          </div>
+                        )
+                      })()}
                       {msg.actions && msg.actions.length > 0 && (
                         <div className="flex flex-wrap gap-1.5 mt-2 pt-2" style={{ borderTop: '1px solid var(--border-subtle)' }}>
                           {msg.actions.map((a, i) => (

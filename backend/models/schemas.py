@@ -78,6 +78,13 @@ class WorkspaceData(BaseModel):
 
 
 # ── Chat ────────────────────────────────────────────────────────────────────
+class ChatTurn(BaseModel):
+    """One prior turn the frontend ships so the agent can resolve references
+    like 'the pie chart you just suggested'."""
+    role: Literal["user", "assistant"]
+    content: str
+
+
 class ChatMessage(BaseModel):
     message: str
     function_id: str | None = None
@@ -88,10 +95,13 @@ class ChatMessage(BaseModel):
         "overview", "data", "models", "workflow", "playbooks",
         "analytics", "reporting", "settings",
     ] | None = None
-    entity_kind: Literal["kpi", "dataset", "scenario", "model", "run", "tile", "workflow"] | None = None
+    entity_kind: Literal["kpi", "dataset", "scenario", "model", "run", "tile", "workflow", "analytic_def"] | None = None
     entity_id: str | None = None
     # Optional payload — for workflow validation we pass nodes/edges
     payload: dict[str, Any] | None = None
+    # Prior turns from the chat panel, oldest-first. The current `message`
+    # is NOT included here — the backend appends it after the history.
+    history: list[ChatTurn] = Field(default_factory=list)
 
 
 class ChatAction(BaseModel):
@@ -109,6 +119,10 @@ class ChatResponse(BaseModel):
     agent_color: str | None = None
     agent_icon: str | None = None
     actions: list[ChatAction] = Field(default_factory=list)
+    # Trace of tool calls / outputs / messages emitted during the run.
+    # Surfaced for tune-style flows so the chat bubble can render a
+    # checklist of what the agent did.
+    trace: list["TraceStep"] = Field(default_factory=list)
 
 
 class AgentInfo(BaseModel):
@@ -273,11 +287,30 @@ class CustomPythonSpec(BaseModel):
     # DataFrame and must return a dict shaped like AnalyticResult below.
 
 
+class PlotStyle(BaseModel):
+    """Visual customization overlay applied to plots and tables.
+
+    Honored by both `PlotConfig` (Reporting tiles) and `AnalyticOutput`
+    (Analytics chart cards). The agent's `plot-tuner` skill mutates fields
+    on this block; the renderer reads them on every render."""
+    palette: list[str] = Field(default_factory=list)  # hex colors, in series order
+    font_size: int | None = None  # pixel size for axis labels + legend
+    title: str | None = None  # chart title (overrides spec name)
+    x_axis_label: str | None = None
+    y_axis_label: str | None = None
+    number_format: str | None = None  # e.g. "0.00", "$0,0.00", "0.0%", "0.0a"
+    label_overrides: dict[str, str] = Field(default_factory=dict)  # {field_name → display label}
+    legend_position: Literal["top", "bottom", "right", "left", "none"] | None = None
+    sort_field: str | None = None  # frontend-side sort applied before render
+    sort_desc: bool = False
+
+
 class AnalyticOutput(BaseModel):
     chart_type: Literal["bar", "line", "area", "stacked_bar", "scatter", "pie", "table", "kpi"] = "bar"
     x_field: str | None = None
     y_fields: list[str] = Field(default_factory=list)
     description: str | None = None
+    style: PlotStyle = Field(default_factory=PlotStyle)
 
 
 class AnalyticDefinition(BaseModel):
@@ -332,6 +365,7 @@ class AnalyticResultChart(BaseModel):
     x_field: str | None = None
     y_fields: list[str] = Field(default_factory=list)
     data: list[dict[str, Any]] = Field(default_factory=list)
+    style: PlotStyle = Field(default_factory=PlotStyle)
 
 
 class AnalyticResultKpi(BaseModel):
@@ -714,6 +748,7 @@ class PlotConfig(BaseModel):
     aggregation: Literal["sum", "avg", "count", "min", "max", "none"] = "none"
     filters: list[dict[str, Any]] = Field(default_factory=list)
     description: str | None = None
+    style: PlotStyle = Field(default_factory=PlotStyle)
 
 
 class PlotConfigCreate(BaseModel):

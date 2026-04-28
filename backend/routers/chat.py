@@ -53,11 +53,19 @@ def _route(req: ChatMessage) -> str:
     if req.entity_kind == "run":
         return "run-troubleshooter" if ("fail" in msg or "error" in msg) else "model-explainer"
     if req.entity_kind == "tile":
-        # Tune if the user explicitly asked for filter / sort / change work,
-        # otherwise default to the explainer (the Sparkles button on a tile).
-        if any(k in msg for k in ("tune", "filter", "sort", "limit", "change", "modify")):
-            return "tile-tuner"
+        # Tune intent → plot-tuner (mutates the persisted spec).
+        # Anything else (default Sparkles click) → tile-explainer (explain).
+        if any(k in msg for k in (
+            "tune", "filter", "sort", "rank", "limit", "change", "modify", "switch",
+            "color", "palette", "font", "label", "title", "axis", "rename",
+            "ascend", "descend", "asc", "desc", "bar", "line", "pie", "area",
+            "format", "legend", "style",
+        )):
+            return "plot-tuner"
         return "tile-explainer"
+    if req.entity_kind == "analytic_def":
+        # Self-serve Analytics chart cards — same plot-tuner toolkit applies.
+        return "plot-tuner"
     if req.entity_kind == "workflow":
         return "workflow-validator"
     if req.tab == "data" and any(k in msg for k in ("quality", "anomal", "outlier", "null")):
@@ -143,11 +151,20 @@ async def send_message(req: ChatMessage, _: str = Depends(get_current_user)):
     target = _route(req)
     ctx = _build_context(req)
 
+    # Cap history to the last 10 turns (5 user-assistant pairs) so token use
+    # stays bounded even if the panel has been open for a long time.
+    history = [t.model_dump() for t in (req.history or [])][-10:]
+
+    trace_dicts: list[dict] = []
     try:
         if target == "orchestrator":
-            text = await _ORCH.chat_orchestrator(req.message, extra_context=ctx)
+            text = await _ORCH.chat_orchestrator(
+                req.message, extra_context=ctx, history=history,
+            )
         else:
-            text = await _ORCH.chat_specialist(target, req.message, extra_context=ctx)
+            text, trace_dicts = await _ORCH.chat_specialist_with_trace(
+                target, req.message, extra_context=ctx, history=history,
+            )
     except Exception as e:
         log.error("Chat call failed: %s", e)
         return ChatResponse(
@@ -170,6 +187,14 @@ async def send_message(req: ChatMessage, _: str = Depends(get_current_user)):
         # can also click the saved filters indicator on the tile).
         pass  # filter actions are written via the tool itself; see tools.py:apply_tile_filter
 
+    from models.schemas import TraceStep
+    trace_steps: list[TraceStep] = []
+    for d in trace_dicts:
+        try:
+            trace_steps.append(TraceStep(**d))
+        except Exception:
+            pass
+
     return ChatResponse(
         response=text,
         agent_id=target,
@@ -177,6 +202,7 @@ async def send_message(req: ChatMessage, _: str = Depends(get_current_user)):
         agent_color=color,
         agent_icon=icon,
         actions=actions,
+        trace=trace_steps,
     )
 
 

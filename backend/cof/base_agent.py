@@ -265,6 +265,7 @@ class CofBaseAgent:
         user_message: str,
         extra_context: str = "",
         on_step: Callable[[dict], None] | None = None,
+        history: list[dict] | None = None,
     ) -> tuple[str, list[dict]]:
         """Run the agent in streaming mode and return (final_text, trace_steps).
 
@@ -279,6 +280,11 @@ class CofBaseAgent:
             messages: list[dict[str, str]] = []
             if extra_context:
                 messages.append({"role": "user", "content": f"[Context]\n{extra_context}"})
+            for turn in history or []:
+                role = turn.get("role")
+                content = turn.get("content")
+                if role in ("user", "assistant") and content:
+                    messages.append({"role": role, "content": content})
             messages.append({"role": "user", "content": user_message})
 
             # Match oasia exactly: non-streaming Runner.run. Some corporate

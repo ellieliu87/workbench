@@ -229,7 +229,12 @@ class AsyncOrchestrator:
         self._maybe_reload()
         return self._skills.get(_norm(agent_id))
 
-    async def chat_orchestrator(self, user_message: str, extra_context: str = "") -> str:
+    async def chat_orchestrator(
+        self,
+        user_message: str,
+        extra_context: str = "",
+        history: list[dict] | None = None,
+    ) -> str:
         """Run the orchestrator (router) agent — it picks specialists via delegate tools."""
         if not self._available:
             raise RuntimeError(self._error or "Orchestrator unavailable")
@@ -239,6 +244,11 @@ class AsyncOrchestrator:
             messages = []
             if extra_context:
                 messages.append({"role": "user", "content": f"[Context]\n{extra_context}"})
+            for turn in history or []:
+                role = turn.get("role")
+                content = turn.get("content")
+                if role in ("user", "assistant") and content:
+                    messages.append({"role": role, "content": content})
             messages.append({"role": "user", "content": user_message})
             result = await Runner.run(
                 starting_agent=self._orch_agent,
@@ -262,6 +272,7 @@ class AsyncOrchestrator:
         user_message: str,
         extra_context: str = "",
         on_step=None,
+        history: list[dict] | None = None,
     ) -> tuple[str, list[dict]]:
         """Run a specialist and return (final_text, trace_steps).
 
@@ -278,4 +289,5 @@ class AsyncOrchestrator:
             )
         return await agent.chat_with_trace(
             user_message, extra_context=extra_context, on_step=on_step,
+            history=history,
         )

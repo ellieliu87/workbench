@@ -15,7 +15,9 @@ import { useEffect, useMemo, useState } from 'react'
 import {
   Plus, Wand2, Loader2, Play, Pencil, Trash2, Copy, X,
   CheckCircle2, AlertCircle, Sparkles, BarChart3, Layers, Code2, RefreshCw,
+  SlidersHorizontal,
 } from 'lucide-react'
+import { useChatStore } from '@/store/chatStore'
 import {
   ResponsiveContainer, BarChart, Bar, LineChart, Line, AreaChart, Area, PieChart, Pie, ScatterChart, Scatter,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend, Cell,
@@ -71,6 +73,23 @@ export default function SelfServeAnalyticsTab({ functionId, onContextChange }: P
   }
 
   useEffect(() => { loadAll() }, [functionId])
+
+  // Re-run the most recent run for a definition when the plot-tuner mutates
+  // its spec via chat. This makes "tune the chart" feel like "the chart
+  // updates" without the user having to click Run again.
+  useEffect(() => {
+    const handler = async (e: Event) => {
+      const detail = (e as CustomEvent).detail as { definition_id?: string }
+      if (!detail?.definition_id) return
+      try {
+        const r = await api.post<AnalyticDefinitionRun>(`/api/analytics_defs/${detail.definition_id}/run`)
+        await loadAll()
+        setActiveRunId(r.data.id)
+      } catch { /* surface in UI later if needed */ }
+    }
+    window.addEventListener('cma-analytic-updated', handler)
+    return () => window.removeEventListener('cma-analytic-updated', handler)
+  }, [functionId])
   useEffect(() => { onContextChange(`Self-serve Analytics — ${defs.length} definition(s), ${runs.length} run(s)`) }, [defs.length, runs.length, onContextChange])
 
   const activeRun = useMemo(() => runs.find((r) => r.id === activeRunId) || null, [runs, activeRunId])
@@ -421,14 +440,27 @@ function DefinitionCard({
 
 // ── Run viewer (chart + table + narrative) ────────────────────────────────
 function RunViewer({
-  run, onClose, onNarrated,
+  run, onClose, onNarrated, onChartUpdated,
 }: {
   run: AnalyticDefinitionRun
   onClose: () => void
   onNarrated: (md: string) => void
+  onChartUpdated?: () => void
 }) {
   const [narrating, setNarrating] = useState(false)
   const [narrErr, setNarrErr] = useState<string | null>(null)
+  const setEntity = useChatStore((s) => s.setEntity)
+  const setOpen = useChatStore((s) => s.setOpen)
+
+  const tuneChart = () => {
+    // Send the agent the analytic definition (not the run snapshot) so the
+    // plot-tuner can mutate the persisted spec; the next run picks it up.
+    setEntity('analytic_def', run.definition_id)
+    setOpen(true)
+    window.dispatchEvent(new CustomEvent('cma-chat', {
+      detail: `Tune the "${run.name}" chart — what would you like to change? (sort, filter, chart type, colors, axis labels, font size, legend)`,
+    }))
+  }
 
   const askNarrate = async () => {
     setNarrating(true); setNarrErr(null)
@@ -451,9 +483,21 @@ function RunViewer({
             {run.id} · {run.kind} · {run.duration_ms.toFixed(0)} ms · {new Date(run.created_at).toLocaleString()}
           </div>
         </div>
-        <button onClick={onClose} className="p-1.5 rounded-md" style={{ color: 'var(--text-muted)' }}>
-          <X size={14} />
-        </button>
+        <div className="flex items-center gap-1">
+          <button
+            onClick={tuneChart}
+            className="p-1.5 rounded-md transition-colors"
+            style={{ color: 'var(--text-muted)' }}
+            title="Tune — sort, filter, change chart type, recolor, rename axes, change fonts"
+            onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.color = '#0F766E')}
+            onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.color = 'var(--text-muted)')}
+          >
+            <SlidersHorizontal size={14} />
+          </button>
+          <button onClick={onClose} className="p-1.5 rounded-md" style={{ color: 'var(--text-muted)' }}>
+            <X size={14} />
+          </button>
+        </div>
       </div>
 
       {run.status === 'failed' && (
@@ -547,65 +591,137 @@ function RunViewer({
 
 function ChartRenderer({ chart }: { chart: NonNullable<AnalyticDefinitionRun['result']>['chart'] }) {
   if (!chart) return null
-  const { type, x_field, y_fields, data } = chart
+  const { type, x_field, y_fields, data, style } = chart
   if (!data || data.length === 0) return null
+
+  // Resolve style overrides — falling back to defaults when fields are unset.
+  const palette = (style?.palette && style.palette.length > 0) ? style.palette : PALETTE
+  const fontSize = style?.font_size ?? 10
+  const legendPosition = style?.legend_position || 'bottom'
+  const legendVisible = legendPosition !== 'none'
+  const legendVAlign: 'top' | 'middle' | 'bottom' =
+    legendPosition === 'top' ? 'top' : legendPosition === 'bottom' ? 'bottom' : 'middle'
+  const legendHAlign: 'left' | 'center' | 'right' =
+    legendPosition === 'left' ? 'left' : legendPosition === 'right' ? 'right' : 'center'
+  const legendLayout: 'horizontal' | 'vertical' =
+    (legendPosition === 'left' || legendPosition === 'right') ? 'vertical' : 'horizontal'
+
+  // Apply client-side sort if the style asks for one.
+  const sortedData = (() => {
+    if (!style?.sort_field || !data.length || !(style.sort_field in data[0])) return data
+    const f = style.sort_field
+    const desc = !!style.sort_desc
+    return [...data].sort((a, b) => {
+      const va = a[f]; const vb = b[f]
+      if (va == null && vb == null) return 0
+      if (va == null) return 1
+      if (vb == null) return -1
+      if (typeof va === 'number' && typeof vb === 'number') return desc ? vb - va : va - vb
+      return desc ? String(vb).localeCompare(String(va)) : String(va).localeCompare(String(vb))
+    })
+  })()
+
+  // Number formatter (very small subset of Excel-style codes).
+  const fmtNum = (v: any): string => {
+    if (typeof v !== 'number') return String(v)
+    const code = style?.number_format
+    if (!code) return v.toLocaleString(undefined, { maximumFractionDigits: 4 })
+    if (code.includes('%')) return (v * (code.includes('0.') ? 100 : 1)).toFixed((code.split('.')[1] || '').replace(/[^0]/g, '').length || 0) + '%'
+    if (code.startsWith('$')) return '$' + v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+    if (code.endsWith('a')) {
+      const abs = Math.abs(v)
+      if (abs >= 1e9) return (v / 1e9).toFixed(2) + 'B'
+      if (abs >= 1e6) return (v / 1e6).toFixed(2) + 'M'
+      if (abs >= 1e3) return (v / 1e3).toFixed(2) + 'K'
+      return v.toFixed(2)
+    }
+    const decimals = (code.split('.')[1] || '').length
+    return v.toLocaleString(undefined, { minimumFractionDigits: decimals, maximumFractionDigits: decimals })
+  }
+
+  // Optional axis labels — wired to Recharts' `label` prop with offsets.
+  const xLabel = style?.x_axis_label
+  const yLabel = style?.y_axis_label
 
   const common = (
     <>
       <CartesianGrid stroke="var(--border-subtle)" strokeDasharray="3 3" />
-      <XAxis dataKey={x_field || ''} stroke="var(--text-muted)" tick={{ fontSize: 10 }} />
-      <YAxis stroke="var(--text-muted)" tick={{ fontSize: 10 }} />
+      <XAxis
+        dataKey={x_field || ''}
+        stroke="var(--text-muted)"
+        tick={{ fontSize }}
+        label={xLabel ? { value: xLabel, position: 'insideBottom', offset: -4, style: { fontSize, fill: 'var(--text-secondary)' } } : undefined}
+      />
+      <YAxis
+        stroke="var(--text-muted)"
+        tick={{ fontSize }}
+        tickFormatter={style?.number_format ? fmtNum : undefined}
+        label={yLabel ? { value: yLabel, angle: -90, position: 'insideLeft', style: { fontSize, fill: 'var(--text-secondary)' } } : undefined}
+      />
       <Tooltip
         contentStyle={{
           background: 'var(--bg-card)', border: '1px solid var(--border)',
-          fontSize: 11, borderRadius: 8,
+          fontSize: fontSize + 1, borderRadius: 8,
         }}
+        formatter={style?.number_format ? (v: any) => fmtNum(v) : undefined}
       />
-      <Legend wrapperStyle={{ fontSize: 10 }} />
+      {legendVisible && (
+        <Legend
+          wrapperStyle={{ fontSize }}
+          verticalAlign={legendVAlign}
+          align={legendHAlign}
+          layout={legendLayout}
+        />
+      )}
     </>
   )
 
   return (
-    <div style={{ height: 280 }}>
+    <div>
+      {style?.title && (
+        <div className="text-sm font-semibold mb-1" style={{ color: 'var(--text-primary)' }}>{style.title}</div>
+      )}
+      <div style={{ height: 280 }}>
       <ResponsiveContainer width="100%" height="100%">
         {type === 'line' ? (
-          <LineChart data={data} margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
+          <LineChart data={sortedData} margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
             {common}
-            {y_fields.map((y, i) => <Line key={y} type="monotone" dataKey={y} stroke={PALETTE[i % PALETTE.length]} strokeWidth={1.5} dot={false} />)}
+            {y_fields.map((y, i) => <Line key={y} type="monotone" dataKey={y} stroke={palette[i % palette.length]} strokeWidth={1.5} dot={false} />)}
           </LineChart>
         ) : type === 'area' ? (
-          <AreaChart data={data} margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
+          <AreaChart data={sortedData} margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
             {common}
-            {y_fields.map((y, i) => <Area key={y} type="monotone" dataKey={y} stroke={PALETTE[i % PALETTE.length]} fill={PALETTE[i % PALETTE.length]} fillOpacity={0.2} />)}
+            {y_fields.map((y, i) => <Area key={y} type="monotone" dataKey={y} stroke={palette[i % palette.length]} fill={palette[i % palette.length]} fillOpacity={0.2} />)}
           </AreaChart>
         ) : type === 'scatter' ? (
           <ScatterChart margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
             {common}
-            {y_fields.map((y, i) => <Scatter key={y} name={y} data={data} dataKey={y} fill={PALETTE[i % PALETTE.length]} />)}
+            {y_fields.map((y, i) => <Scatter key={y} name={y} data={sortedData} dataKey={y} fill={palette[i % palette.length]} />)}
           </ScatterChart>
         ) : type === 'pie' ? (
           <PieChart>
-            <Tooltip />
-            <Legend wrapperStyle={{ fontSize: 10 }} />
-            <Pie data={data} dataKey={y_fields[0]} nameKey={x_field || ''} outerRadius={90} label={{ fontSize: 10 }}>
-              {data.map((_, i) => <Cell key={i} fill={PALETTE[i % PALETTE.length]} />)}
+            <Tooltip formatter={style?.number_format ? (v: any) => fmtNum(v) : undefined} />
+            {legendVisible && <Legend wrapperStyle={{ fontSize }} verticalAlign={legendVAlign} align={legendHAlign} layout={legendLayout} />}
+            <Pie data={sortedData} dataKey={y_fields[0]} nameKey={x_field || ''} outerRadius={90} label={{ fontSize }}>
+              {sortedData.map((_, i) => <Cell key={i} fill={palette[i % palette.length]} />)}
             </Pie>
           </PieChart>
         ) : (
           // bar / stacked_bar / fallback
-          <BarChart data={data} margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
+          <BarChart data={sortedData} margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
             {common}
             {y_fields.map((y, i) => (
               <Bar
                 key={y}
                 dataKey={y}
                 stackId={type === 'stacked_bar' ? 'stack' : undefined}
-                fill={PALETTE[i % PALETTE.length]}
+                fill={palette[i % palette.length]}
               />
             ))}
           </BarChart>
         )}
       </ResponsiveContainer>
+      </div>
     </div>
   )
 }

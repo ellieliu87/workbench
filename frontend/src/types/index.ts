@@ -70,6 +70,7 @@ export interface ChatMessageItem {
   agent_color?: string | null
   agent_icon?: string | null
   actions?: ChatAction[]
+  trace?: TraceStep[]
 }
 
 export interface WorkflowValidationIssue {
@@ -322,11 +323,25 @@ export interface CustomPythonSpec {
   python_source: string
 }
 
+export interface PlotStyle {
+  palette?: string[]
+  font_size?: number | null
+  title?: string | null
+  x_axis_label?: string | null
+  y_axis_label?: string | null
+  number_format?: string | null
+  label_overrides?: Record<string, string>
+  legend_position?: 'top' | 'bottom' | 'right' | 'left' | 'none' | null
+  sort_field?: string | null
+  sort_desc?: boolean
+}
+
 export interface AnalyticOutput {
   chart_type: 'bar' | 'line' | 'area' | 'stacked_bar' | 'scatter' | 'pie' | 'table' | 'kpi'
   x_field?: string | null
   y_fields: string[]
   description?: string | null
+  style?: PlotStyle
 }
 
 export interface AnalyticDefinition {
@@ -356,6 +371,7 @@ export interface AnalyticResultChart {
   x_field?: string | null
   y_fields: string[]
   data: Record<string, any>[]
+  style?: PlotStyle
 }
 
 export interface AnalyticResultKpi {
@@ -508,4 +524,5 @@ export interface PlotConfig {
   aggregation: 'sum' | 'avg' | 'count' | 'min' | 'max' | 'none'
   filters: Record<string, any>[]
   description?: string | null
+  style?: PlotStyle
 }

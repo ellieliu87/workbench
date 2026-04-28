@@ -31,6 +31,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from cof.llm_config import resolve_model
+
 _HERE = Path(__file__).parent
 BUILTIN_SKILLS_DIR = _HERE / "skills"
 USER_SKILLS_DIR = _HERE / "skills_user"
@@ -133,7 +135,7 @@ def _load_one(path: Path, source: str, pack_id: str | None = None) -> AgentSkill
     return AgentSkill(
         name=meta.get("name", path.stem.replace("_", "-")),
         description=meta.get("description", ""),
-        model=meta.get("model", "gpt-oss-120b"),
+        model=resolve_model(meta.get("model")),
         system_prompt=body,
         tools=meta.get("tools", []) if isinstance(meta.get("tools", []), list) else [],
         sub_agents=meta.get("sub_agents", []) if isinstance(meta.get("sub_agents", []), list) else [],
