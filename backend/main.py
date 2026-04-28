@@ -33,6 +33,7 @@ from routers import (
     scenarios,
     playbooks,
     analytics_defs,
+    overview_layouts,
 )
 
 app = FastAPI(
@@ -67,13 +68,14 @@ app.include_router(skills.router, prefix="/api/skills", tags=["Agent Skills"])
 app.include_router(plots.router, prefix="/api/plots", tags=["Plot Builder"])
 app.include_router(tools.router, prefix="/api/tools", tags=["Python Tools"])
 app.include_router(analytics_defs.router, prefix="/api/analytics_defs", tags=["Analytics Definitions"])
+app.include_router(overview_layouts.router, prefix="/api/overview_layouts", tags=["Overview Layouts"])
 
 
 @app.on_event("startup")
 async def _ingest_pack_assets():
-    """After all routers and registries are wired, pull dataset and model
-    attachments from each registered pack into the dataset/model stores.
-    Tools are ingested lazily inside `routers/tools.py:_seed()`."""
+    """After all routers and registries are wired, pull dataset, model,
+    and plot attachments from each registered pack into the in-memory
+    stores. Tools are ingested lazily inside `routers/tools.py:_seed()`."""
     try:
         datasets._ingest_pack_datasets()
     except Exception as e:
@@ -82,6 +84,11 @@ async def _ingest_pack_assets():
         models_registry._ingest_pack_models()
     except Exception as e:
         print(f"[startup] model pack ingest failed: {e}")
+    # Plots depend on dataset ingest — they reference dataset_ids by name.
+    try:
+        plots._ingest_pack_plots()
+    except Exception as e:
+        print(f"[startup] plot pack ingest failed: {e}")
 
 
 @app.get("/health")

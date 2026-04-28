@@ -1,34 +1,43 @@
 import { useEffect, useState } from 'react'
 import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import {
-  Home, Settings, LogOut, Briefcase, LineChart, Droplet, ShieldAlert,
-  Banknote, Building2, Activity, FileSpreadsheet, Sparkles,
+  Home, Settings, LogOut, Sparkles,
+  LayoutDashboard, Database, Boxes, FlaskConical, BarChart3,
+  ListChecks, FileBarChart,
 } from 'lucide-react'
 import { useAuthStore } from '@/store/authStore'
 import api from '@/lib/api'
 import { cn } from '@/lib/utils'
 import type { BusinessFunction } from '@/types'
 
-const ICONS: Record<string, any> = {
-  briefcase: Briefcase,
-  'line-chart': LineChart,
-  droplet: Droplet,
-  'shield-alert': ShieldAlert,
-  banknote: Banknote,
-  'building-2': Building2,
-  activity: Activity,
-  'file-spreadsheet': FileSpreadsheet,
-}
+const WORKSPACE_TABS = [
+  { id: 'overview',  label: 'Overview',  icon: LayoutDashboard },
+  { id: 'data',      label: 'Data',      icon: Database },
+  { id: 'models',    label: 'Models',    icon: Boxes },
+  { id: 'workflow',  label: 'Workflow',  icon: FlaskConical },
+  { id: 'playbooks', label: 'Playbooks', icon: ListChecks },
+  { id: 'analytics', label: 'Analytics', icon: BarChart3 },
+  { id: 'reporting', label: 'Reporting', icon: FileBarChart },
+] as const
 
 export default function Sidebar() {
   const { username, role, department, logout } = useAuthStore()
   const navigate = useNavigate()
   const location = useLocation()
-  const [functions, setFunctions] = useState<BusinessFunction[]>([])
+  const [activeFunction, setActiveFunction] = useState<BusinessFunction | null>(null)
+
+  // Detect which function (if any) the user is currently in.
+  const fnMatch = location.pathname.match(/^\/workspace\/([^/]+)/)
+  const fnId = fnMatch ? fnMatch[1] : null
+  const tabMatch = location.pathname.match(/^\/workspace\/[^/]+\/([^/]+)/)
+  const activeTab = tabMatch ? tabMatch[1] : 'overview'
 
   useEffect(() => {
-    api.get<BusinessFunction[]>('/api/functions').then((r) => setFunctions(r.data)).catch(() => {})
-  }, [])
+    if (!fnId) { setActiveFunction(null); return }
+    api.get<BusinessFunction>(`/api/functions/${fnId}`)
+      .then((r) => setActiveFunction(r.data))
+      .catch(() => setActiveFunction(null))
+  }, [fnId])
 
   const handleLogout = async () => {
     try { await api.post('/api/auth/logout') } catch {}
@@ -70,20 +79,28 @@ export default function Sidebar() {
         <div className="px-2 pb-1.5 section-title">Main</div>
         <NavItem to="/home" label="Home" icon={Home} active={location.pathname === '/home'} />
 
-        <div className="px-2 pt-3 pb-1.5 section-title">Functions</div>
-        {functions.map((f) => {
-          const Icon = ICONS[f.icon] || Briefcase
-          return (
-            <NavItem
-              key={f.id}
-              to={`/workspace/${f.id}`}
-              label={f.short_name}
-              icon={Icon}
-              active={location.pathname === `/workspace/${f.id}`}
-              accent={f.color}
-            />
-          )
-        })}
+        {fnId && (
+          <>
+            <div
+              className="px-2 pt-3 pb-1.5 section-title flex items-center justify-between"
+              title="The function this workspace belongs to. Click Home to switch."
+            >
+              <span className="truncate">
+                {activeFunction?.short_name || activeFunction?.name || fnId.replace(/_/g, ' ')}
+              </span>
+            </div>
+            {WORKSPACE_TABS.map(({ id, label, icon }) => (
+              <NavItem
+                key={id}
+                to={`/workspace/${fnId}/${id}`}
+                label={label}
+                icon={icon}
+                active={activeTab === id}
+                accent={activeFunction?.color}
+              />
+            ))}
+          </>
+        )}
 
         <div className="px-2 pt-3 pb-1.5 section-title">Configuration</div>
         <NavItem

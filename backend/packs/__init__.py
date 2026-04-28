@@ -71,6 +71,7 @@ _PACKS: dict[str, Pack] = {}
 _PYTHON_TOOL_SEEDS: list[dict] = []           # consumed by routers/tools.py
 _DATASET_ATTACHMENTS: list[dict] = []         # consumed by routers/datasets.py
 _MODEL_ATTACHMENTS: list[dict] = []           # consumed by routers/models_registry.py
+_PLOT_ATTACHMENTS: list[dict] = []            # consumed by routers/plots.py
 
 
 # ── PackContext (the API a pack uses) ──────────────────────────────────────
@@ -149,6 +150,28 @@ class PackContext:
             "name": name,
             "description": description,
             "source_path": Path(source_path),
+            "pack_id": self.pack.id,
+        })
+
+    # ── Plot / tile attachments ────────────────────────────────────────────
+    def attach_plot(
+        self,
+        *,
+        function_id: str,
+        plot_id: str,
+        config: dict,
+    ) -> None:
+        """Stage a pre-built tile (KPI / plot / table) for a function.
+
+        `config` is a partial PlotConfig dict — `id` and `function_id` are
+        injected by the router on ingest. Useful for demo packs that ship
+        a starter Reporting-tab dashboard the user can then pin / tune /
+        delete. Plots come up unpinned by default; the user pins from the
+        UI to surface them on Overview."""
+        _PLOT_ATTACHMENTS.append({
+            "function_id": function_id,
+            "plot_id": plot_id,
+            "config": dict(config),
             "pack_id": self.pack.id,
         })
 
@@ -237,6 +260,10 @@ def dataset_attachments() -> list[dict]:
 
 def model_attachments() -> list[dict]:
     return list(_MODEL_ATTACHMENTS)
+
+
+def plot_attachments() -> list[dict]:
+    return list(_PLOT_ATTACHMENTS)
 
 
 # ── Authorization helper ───────────────────────────────────────────────────

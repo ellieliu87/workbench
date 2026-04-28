@@ -18,6 +18,30 @@ router = APIRouter()
 _PLOTS: dict[str, PlotConfig] = {}
 
 
+def _ingest_pack_plots() -> None:
+    """Materialize every pack-attached plot into `_PLOTS`. Called at
+    startup so pack-shipped demo dashboards land in the Reporting tab as
+    if a user had built them. Existing entries with the same id are left
+    alone so a user-edited tile isn't clobbered on a future re-ingest."""
+    from packs import plot_attachments
+    for att in plot_attachments():
+        plot_id = att["plot_id"]
+        if plot_id in _PLOTS:
+            continue
+        cfg = dict(att.get("config") or {})
+        cfg["id"] = plot_id
+        cfg.setdefault("function_id", att["function_id"])
+        try:
+            _PLOTS[plot_id] = PlotConfig(**cfg)
+        except Exception as e:
+            # Don't kill startup over a bad pack tile — log and skip.
+            import logging
+            logging.getLogger("cma.plots").warning(
+                "[pack:%s] plot %s failed to ingest: %s",
+                att.get("pack_id", "?"), plot_id, e,
+            )
+
+
 # Sample fields by data source (used by the designer when no dataset is bound)
 SAMPLE_FIELDS = {
     "ds-snowflake-prod": [
@@ -32,27 +56,10 @@ SAMPLE_FIELDS = {
 }
 
 
-def _seed():
-    if _PLOTS:
-        return
-    seeds = [
-        PlotConfig(
-            id="plot-nav-trend",
-            function_id="investment_portfolio",
-            name="NAV Trend",
-            chart_type="line",
-            data_source_id="ds-snowflake-prod",
-            x_field="month",
-            y_fields=["nav"],
-            aggregation="sum",
-            description="Monthly NAV trajectory over the trailing year.",
-        ),
-    ]
-    for p in seeds:
-        _PLOTS[p.id] = p
-
-
-_seed()
+# Reporting-tab tiles come exclusively from pack attachments now (see
+# `_ingest_pack_plots()`). The previous import-time seed of a synthetic
+# `plot-nav-trend` was removed so the Reporting tab opens with only the
+# user's pack-bundled and user-created tiles.
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
@@ -75,6 +82,61 @@ def _aggregate(df: pd.DataFrame, x: str, ys: list[str], how: str) -> pd.DataFram
     agg_map = {y: how if how != "avg" else "mean" for y in available_ys}
     grouped = df.groupby(x, as_index=False).agg(agg_map)
     return grouped
+
+
+def _compute_kpi(df: pd.DataFrame, p) -> dict[str, Any] | None:
+    """Reduce a (filtered) dataframe to a single KPI value + formatted
+    display string per the tile's KPI config. Returns None on bad config."""
+    field = p.kpi_field
+    if not field or field not in df.columns:
+        return None
+    agg = p.kpi_aggregation
+    try:
+        if agg == "weighted_avg":
+            wf = p.kpi_weight_field
+            if not wf or wf not in df.columns:
+                return None
+            joined = pd.DataFrame({
+                "v": pd.to_numeric(df[field], errors="coerce"),
+                "w": pd.to_numeric(df[wf], errors="coerce"),
+            }).dropna()
+            if joined.empty or joined["w"].sum() == 0:
+                return None
+            value = float((joined["v"] * joined["w"]).sum() / joined["w"].sum())
+        elif agg == "latest":
+            sort_col = p.kpi_latest_field or field
+            if sort_col not in df.columns:
+                return None
+            sorted_df = df.sort_values(sort_col, ascending=False)
+            non_null = pd.to_numeric(sorted_df[field], errors="coerce").dropna()
+            if non_null.empty:
+                return None
+            value = float(non_null.iloc[0])
+        else:
+            series = pd.to_numeric(df[field], errors="coerce").dropna()
+            if series.empty:
+                return None
+            if agg == "sum":     value = float(series.sum())
+            elif agg == "avg":   value = float(series.mean())
+            elif agg == "min":   value = float(series.min())
+            elif agg == "max":   value = float(series.max())
+            elif agg == "count": value = float(series.count())
+            else: return None
+    except Exception:
+        return None
+
+    scale = p.kpi_scale if p.kpi_scale else 1.0
+    decimals = max(0, min(6, int(p.kpi_decimals or 0)))
+    scaled = value * scale
+    formatted = f"{scaled:,.{decimals}f}"
+    display = f"{p.kpi_prefix}{formatted}{p.kpi_suffix}"
+    return {
+        "value": value,
+        "scaled": scaled,
+        "display": display,
+        "label": p.name,
+        "sublabel": p.kpi_sublabel,
+    }
 
 
 def _apply_filters(df: pd.DataFrame, filters: list[dict[str, Any]]) -> pd.DataFrame:
@@ -201,11 +263,13 @@ async def preview_plot(plot_id: str, _: str = Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="Plot not found")
 
     is_table = p.tile_type == "table"
+    is_kpi = p.tile_type == "kpi"
     row_cap = 1000 if is_table else 200  # tables show more rows; plots aggregate
 
     # Pull data from the configured source
     rows: list[dict[str, Any]] | None = None
     columns_meta: list[dict[str, str]] | None = None
+    kpi_payload: dict[str, Any] | None = None
 
     if p.dataset_id:
         d = _DATASETS.get(p.dataset_id)
@@ -213,9 +277,13 @@ async def preview_plot(plot_id: str, _: str = Depends(get_current_user)):
             try:
                 df = _read_dataframe(_resolve_path(d), d.file_format)
                 df = _apply_filters(df, p.filters)
-                if not is_table:
-                    df = _aggregate(df, p.x_field, p.y_fields, p.aggregation)
-                rows = _df_records(df, row_cap)
+                if is_kpi:
+                    kpi_payload = _compute_kpi(df, p)
+                    rows = []  # KPI tiles don't render rows
+                else:
+                    if not is_table:
+                        df = _aggregate(df, p.x_field, p.y_fields, p.aggregation)
+                    rows = _df_records(df, row_cap)
                 columns_meta = [{"name": c, "dtype": str(df[c].dtype)} for c in df.columns]
             except Exception:
                 rows = None
@@ -224,14 +292,36 @@ async def preview_plot(plot_id: str, _: str = Depends(get_current_user)):
         if run and run.series:
             df = pd.DataFrame(run.series)
             df = _apply_filters(df, p.filters)
-            if not is_table:
-                df = _aggregate(df, p.x_field, p.y_fields, p.aggregation)
-            rows = _df_records(df, row_cap)
+            if is_kpi:
+                kpi_payload = _compute_kpi(df, p)
+                rows = []
+            else:
+                if not is_table:
+                    df = _aggregate(df, p.x_field, p.y_fields, p.aggregation)
+                rows = _df_records(df, row_cap)
             columns_meta = [{"name": c, "dtype": str(df[c].dtype)} for c in df.columns]
 
     if rows is not None:
-        return {
+        result = {
             "plot": p, "preview_data": rows, "columns": columns_meta or [], "source": "live",
+        }
+        if is_kpi:
+            result["kpi"] = kpi_payload or {
+                "value": None, "scaled": None,
+                "display": f"{p.kpi_prefix}—{p.kpi_suffix}",
+                "label": p.name, "sublabel": p.kpi_sublabel,
+            }
+        return result
+
+    if is_kpi:
+        # No live data — return a placeholder KPI so the tile still renders.
+        return {
+            "plot": p, "preview_data": [], "columns": [], "source": "sample",
+            "kpi": {
+                "value": None, "scaled": None,
+                "display": f"{p.kpi_prefix}—{p.kpi_suffix}",
+                "label": p.name, "sublabel": p.kpi_sublabel,
+            },
         }
 
     # Fall back to a synthetic sample

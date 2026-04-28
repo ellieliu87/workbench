@@ -510,7 +510,7 @@ export interface PlotConfig {
   id: string
   function_id?: string | null
   name: string
-  tile_type: 'plot' | 'table'
+  tile_type: 'plot' | 'table' | 'kpi'
   chart_type: 'line' | 'bar' | 'area' | 'pie' | 'scatter' | 'stacked_bar'
   data_source_id?: string | null
   dataset_id?: string | null
@@ -525,4 +525,22 @@ export interface PlotConfig {
   filters: Record<string, any>[]
   description?: string | null
   style?: PlotStyle
+  // KPI tile fields
+  kpi_field?: string
+  kpi_aggregation?: 'sum' | 'avg' | 'weighted_avg' | 'latest' | 'min' | 'max' | 'count'
+  kpi_weight_field?: string | null
+  kpi_latest_field?: string | null
+  kpi_prefix?: string
+  kpi_suffix?: string
+  kpi_decimals?: number
+  kpi_scale?: number
+  kpi_sublabel?: string | null
+}
+
+export interface KpiPreview {
+  value: number | null
+  scaled: number | null
+  display: string
+  label: string
+  sublabel: string | null
 }

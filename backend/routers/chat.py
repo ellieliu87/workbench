@@ -19,7 +19,13 @@ from typing import Any
 
 from fastapi import APIRouter, Depends
 
+from datetime import datetime, timezone
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
 from agent.skill_loader import AgentSkill, list_skills
+from agent.tools import reset_request_context, set_request_context
 from cof.orchestrator import AsyncOrchestrator
 from models.schemas import (
     AgentInfo,
@@ -79,8 +85,17 @@ def _route(req: ChatMessage) -> str:
             return "run-troubleshooter"
         return "workflow-validator"
     if req.tab == "reporting":
-        # Default Reporting-tab chat (no specific tile picked) → tile explainer.
-        # Tune intent is handled above when entity_kind == 'tile'.
+        # If the user types a tune-style request without first clicking
+        # Tune on a tile, route to plot-tuner so it can list available tiles
+        # by name and ask which one to mutate. The default for non-tune
+        # questions stays tile-explainer.
+        if any(k in msg for k in (
+            "tune", "filter", "sort", "rank", "limit", "change", "modify",
+            "switch", "color", "palette", "font", "label", "title", "axis",
+            "rename", "ascend", "descend", "asc", "desc", "bar", "line",
+            "pie", "area", "format", "legend", "style",
+        )):
+            return "plot-tuner"
         return "tile-explainer"
     if req.tab == "analytics":
         # New self-serve analytics tab — no dedicated specialist yet, so route
@@ -155,6 +170,16 @@ async def send_message(req: ChatMessage, _: str = Depends(get_current_user)):
     # stays bounded even if the panel has been open for a long time.
     history = [t.model_dump() for t in (req.history or [])][-10:]
 
+    # Push the request's bound entity into a contextvar so the agent's
+    # mutation tools (apply_filter, set_chart_type, …) can fall back to it
+    # when the model forgets to echo target_id. Without this fallback the
+    # plot-tuner often described changes without actually applying them.
+    ctx_token = set_request_context({
+        "entity_kind": req.entity_kind,
+        "entity_id": req.entity_id,
+        "function_id": req.function_id,
+    })
+
     trace_dicts: list[dict] = []
     try:
         if target == "orchestrator":
@@ -174,6 +199,8 @@ async def send_message(req: ChatMessage, _: str = Depends(get_current_user)):
             agent_color="#FF5C5C",
             agent_icon="life-buoy",
         )
+    finally:
+        reset_request_context(ctx_token)
 
     name, color, icon = _agent_meta(target)
 
@@ -204,6 +231,57 @@ async def send_message(req: ChatMessage, _: str = Depends(get_current_user)):
         actions=actions,
         trace=trace_steps,
     )
+
+
+# ── Human feedback (thumbs up/down) ────────────────────────────────────────
+# Captured per assistant message so the offline LLM-eval pipeline can pull
+# annotations for relevance / correctness scoring. Stored in-memory today;
+# wire to LangSmith / Langfuse / a JSONL log later by extending the
+# `_FEEDBACK_LOG` writer.
+class FeedbackRequest(BaseModel):
+    message_id: str
+    rating: Literal["up", "down"]
+    agent_id: str | None = None
+    agent_name: str | None = None
+    user_message: str | None = None  # the analyst prompt that produced the response
+    assistant_message: str | None = None  # the agent's reply text
+    comment: str | None = Field(default=None, max_length=2000)
+    function_id: str | None = None
+    tab: str | None = None
+    entity_kind: str | None = None
+    entity_id: str | None = None
+
+
+class FeedbackEntry(FeedbackRequest):
+    rated_by: str
+    rated_at: str  # ISO-8601 UTC
+
+
+_FEEDBACK_LOG: list[FeedbackEntry] = []
+
+
+@router.post("/feedback", response_model=FeedbackEntry)
+async def submit_feedback(
+    body: FeedbackRequest,
+    user: str = Depends(get_current_user),
+):
+    entry = FeedbackEntry(
+        **body.model_dump(),
+        rated_by=user,
+        rated_at=datetime.now(timezone.utc).isoformat(),
+    )
+    _FEEDBACK_LOG.append(entry)
+    log.info(
+        "[feedback] %s rated %s on msg=%s agent=%s",
+        user, body.rating, body.message_id, body.agent_id or "?",
+    )
+    return entry
+
+
+@router.get("/feedback", response_model=list[FeedbackEntry])
+async def list_feedback(_: str = Depends(get_current_user)):
+    """Pull recent feedback annotations for the eval pipeline."""
+    return list(_FEEDBACK_LOG[-500:])  # cap response size
 
 
 # Re-export the validation helper (kept for backwards compatibility with the

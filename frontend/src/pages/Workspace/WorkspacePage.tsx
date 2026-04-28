@@ -1,9 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import {
-  ArrowLeft, MessageCircle, LayoutDashboard, Database, Boxes, FlaskConical, BarChart3,
-  ListChecks, FileBarChart,
-} from 'lucide-react'
+import { ArrowLeft, MessageCircle } from 'lucide-react'
 import api from '@/lib/api'
 import type { BusinessFunction } from '@/types'
 import { useChatStore } from '@/store/chatStore'
@@ -16,17 +13,14 @@ import ReportsTab from './ReportsTab'
 import PlaybooksTab from './PlaybooksTab'
 import SelfServeAnalyticsTab from './SelfServeAnalyticsTab'
 
-const TABS = [
-  { id: 'overview',  label: 'Overview',  icon: LayoutDashboard },
-  { id: 'data',      label: 'Data',      icon: Database },
-  { id: 'models',    label: 'Models',    icon: Boxes },
-  { id: 'workflow',  label: 'Workflow',  icon: FlaskConical },
-  { id: 'playbooks', label: 'Playbooks', icon: ListChecks },
-  { id: 'analytics', label: 'Analytics', icon: BarChart3 },
-  { id: 'reporting', label: 'Reporting', icon: FileBarChart },
+// Tab navigation is rendered in the left sidebar (see Sidebar.tsx). This
+// list now exists only to validate the `:tab` route param and pick a
+// default when it's missing.
+const VALID_TABS = [
+  'overview', 'data', 'models', 'workflow',
+  'playbooks', 'analytics', 'reporting',
 ] as const
-
-type TabId = (typeof TABS)[number]['id']
+type TabId = (typeof VALID_TABS)[number]
 
 export default function WorkspacePage() {
   const { functionId, tab } = useParams<{ functionId: string; tab?: string }>()
@@ -36,7 +30,7 @@ export default function WorkspacePage() {
   const setTab = useChatStore((s) => s.setTab)
   const setEntity = useChatStore((s) => s.setEntity)
 
-  const active: TabId = (TABS.find((t) => t.id === tab)?.id || 'overview') as TabId
+  const active: TabId = (VALID_TABS.find((t) => t === tab) || 'overview') as TabId
   const [meta, setMeta] = useState<BusinessFunction | null>(null)
 
   useEffect(() => {
@@ -90,37 +84,8 @@ export default function WorkspacePage() {
         </div>
       </div>
 
-      {/* Tab bar */}
-      <div
-        className="flex items-center gap-1 mb-6"
-        style={{ borderBottom: '1px solid var(--border)' }}
-      >
-        {TABS.map(({ id, label, icon: Icon }) => {
-          const isActive = active === id
-          return (
-            <button
-              key={id}
-              onClick={() => navigate(`/workspace/${functionId}/${id}`)}
-              className="px-4 py-2.5 text-sm font-medium flex items-center gap-2 transition-colors"
-              style={{
-                color: isActive ? 'var(--accent)' : 'var(--text-secondary)',
-                borderBottom: `2px solid ${isActive ? 'var(--accent)' : 'transparent'}`,
-                marginBottom: -1,
-                fontWeight: isActive ? 600 : 500,
-              }}
-              onMouseEnter={(e) => {
-                if (!isActive) (e.currentTarget as HTMLElement).style.color = 'var(--text-primary)'
-              }}
-              onMouseLeave={(e) => {
-                if (!isActive) (e.currentTarget as HTMLElement).style.color = 'var(--text-secondary)'
-              }}
-            >
-              <Icon size={14} />
-              {label}
-            </button>
-          )
-        })}
-      </div>
+      {/* Tab navigation now lives in the left sidebar — the horizontal tab
+          bar that used to sit here has been removed. */}
 
       {/* Tab content */}
       {active === 'overview' && (

@@ -10,6 +10,7 @@ materially change the tile when the analyst clicks an action chip.
 """
 from __future__ import annotations
 
+import contextvars
 import json
 import math
 from typing import Any
@@ -21,6 +22,40 @@ from routers.models_registry import _MODELS
 from routers.plots import _PLOTS, _apply_filters
 from routers.scenarios import _RUNS, _SCENARIOS
 from services.workspace_data import get_workspace
+
+
+# ── Per-request context (entity_kind / entity_id / function_id) ──────────
+# The chat router pushes the request's bound entity into this contextvar
+# before invoking the agent. Mutation tools fall back to it when the model
+# omits `target_id` / `target_kind`, so a user who clicked "Tune" on a tile
+# can ask "switch to bar" without the model needing to echo the tile id.
+_REQUEST_CTX: contextvars.ContextVar[dict] = contextvars.ContextVar(
+    "_cma_agent_request_ctx", default={},
+)
+
+
+def set_request_context(ctx: dict) -> contextvars.Token:
+    """Set the active request context. Caller should reset() the token when
+    the agent run finishes (use try/finally)."""
+    return _REQUEST_CTX.set(dict(ctx or {}))
+
+
+def reset_request_context(token: contextvars.Token) -> None:
+    _REQUEST_CTX.reset(token)
+
+
+def _ctx_target() -> tuple[str | None, str | None]:
+    ctx = _REQUEST_CTX.get() or {}
+    kind = ctx.get("entity_kind")
+    eid = ctx.get("entity_id")
+    if kind in ("tile", "analytic_def") and eid:
+        return kind, eid
+    return None, None
+
+
+def _ctx_tile_id() -> str:
+    kind, eid = _ctx_target()
+    return eid if kind == "tile" else ""
 
 
 # OpenAI-format tool schemas — these are advertised to the LLM
@@ -438,13 +473,13 @@ def _t_get_run(args: dict) -> str:
 
 
 def _t_get_tile(args: dict) -> str:
-    tid = args.get("tile_id", "")
+    tid = args.get("tile_id", "") or _ctx_tile_id()
     p = _PLOTS.get(tid)
     return p.model_dump_json(indent=2) if p else json.dumps({"error": f"Tile `{tid}` not found"})
 
 
 def _t_get_tile_preview(args: dict) -> str:
-    tid = args.get("tile_id", "")
+    tid = args.get("tile_id", "") or _ctx_tile_id()
     p = _PLOTS.get(tid)
     if not p:
         return json.dumps({"error": f"Tile `{tid}` not found"})
@@ -464,7 +499,7 @@ def _t_get_tile_preview(args: dict) -> str:
 
 
 def _t_apply_tile_filter(args: dict) -> str:
-    tid = args.get("tile_id", "")
+    tid = args.get("tile_id", "") or _ctx_tile_id()
     p = _PLOTS.get(tid)
     if not p:
         return json.dumps({"error": f"Tile `{tid}` not found"})
@@ -476,9 +511,16 @@ def _t_apply_tile_filter(args: dict) -> str:
 # ── Plot-tuner mutation tools (work on tile OR analytic_def) ─────────────
 def _resolve_target(args: dict):
     """Return (kind, obj, owner_dict) for whichever registry holds the target.
-    Returns (kind, None, None) if not found."""
-    kind = args.get("target_kind", "")
-    tid = args.get("target_id", "")
+    Falls back to the active request context's bound entity when the model
+    omits target_kind / target_id — so the analyst's "Tune" click is
+    sufficient state and the model never has to echo the id back."""
+    kind = args.get("target_kind", "") or ""
+    tid = args.get("target_id", "") or ""
+    if not kind or not tid:
+        ck, ce = _ctx_target()
+        if ck:
+            kind = kind or ck
+            tid = tid or ce
     if kind == "tile":
         return ("tile", _PLOTS.get(tid), _PLOTS)
     if kind == "analytic_def":

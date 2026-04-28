@@ -9,14 +9,14 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   BarChart3, Plus, Trash2, X, Sparkles, LineChart as LineIcon, PieChart as PieIcon,
   TrendingUp, GitCommit, Layers, Database, FlaskConical, Table as TableIcon,
-  Upload, ZoomIn, Pin, PinOff, SlidersHorizontal,
+  Upload, ZoomIn, Pin, PinOff, SlidersHorizontal, Gauge,
 } from 'lucide-react'
 import api from '@/lib/api'
 import { useChatStore } from '@/store/chatStore'
 import Chart from '@/components/charts/Chart'
 import InteractiveTable from '@/components/charts/InteractiveTable'
 import type {
-  ChartSpec, Dataset, AnalyticsRun, PlotConfig,
+  ChartSpec, Dataset, AnalyticsRun, PlotConfig, KpiPreview,
 } from '@/types'
 
 const CHART_TYPES: { id: PlotConfig['chart_type']; label: string; icon: any }[] = [
@@ -40,6 +40,7 @@ interface PreviewBundle {
   rows: Record<string, any>[]
   columns: string[]
   source: string
+  kpi?: KpiPreview
 }
 
 export default function ReportsTab({ functionId, functionName, onAskAgent, onContextChange }: Props) {
@@ -88,7 +89,7 @@ export default function ReportsTab({ functionId, functionName, onAskAgent, onCon
           (r.data.preview_data[0] ? Object.keys(r.data.preview_data[0]) : [])
         setPreviews((prev) => ({
           ...prev,
-          [p.id]: { spec, rows: r.data.preview_data, columns: cols, source: r.data.source },
+          [p.id]: { spec, rows: r.data.preview_data, columns: cols, source: r.data.source, kpi: r.data.kpi },
         }))
       })
     }
@@ -131,7 +132,7 @@ export default function ReportsTab({ functionId, functionName, onAskAgent, onCon
           (r.data.preview_data[0] ? Object.keys(r.data.preview_data[0]) : [])
         setPreviews((prev) => ({
           ...prev,
-          [p.id]: { spec, rows: r.data.preview_data, columns: cols, source: r.data.source },
+          [p.id]: { spec, rows: r.data.preview_data, columns: cols, source: r.data.source, kpi: r.data.kpi },
         }))
       })
     })
@@ -261,6 +262,7 @@ function TileCard({
   onTune: () => void
 }) {
   const isTable = tile.tile_type === 'table'
+  const isKpi = tile.tile_type === 'kpi'
   const sourceLabel = (() => {
     if (tile.dataset_id) {
       const d = datasets.find((x) => x.id === tile.dataset_id)
@@ -281,18 +283,18 @@ function TileCard({
             <div
               className="w-7 h-7 rounded-md flex items-center justify-center shrink-0"
               style={{
-                background: isTable ? 'rgba(15,118,110,0.10)' : 'var(--accent-light)',
-                color: isTable ? '#0F766E' : 'var(--accent)',
+                background: isKpi ? 'rgba(124,58,237,0.10)' : isTable ? 'rgba(15,118,110,0.10)' : 'var(--accent-light)',
+                color: isKpi ? '#7C3AED' : isTable ? '#0F766E' : 'var(--accent)',
               }}
             >
-              {isTable ? <TableIcon size={14} /> : <BarChart3 size={14} />}
+              {isKpi ? <Gauge size={14} /> : isTable ? <TableIcon size={14} /> : <BarChart3 size={14} />}
             </div>
             <div className="min-w-0">
               <div className="font-display text-base font-semibold truncate" style={{ color: 'var(--text-primary)' }}>
                 {tile.name}
               </div>
               <div className="text-[11px] truncate" style={{ color: 'var(--text-muted)' }}>
-                {isTable ? 'Table' : tile.chart_type} · {sourceLabel}
+                {isKpi ? `KPI · ${tile.kpi_aggregation || 'sum'}(${tile.kpi_field || '?'})` : isTable ? 'Table' : tile.chart_type} · {sourceLabel}
                 {preview?.source === 'live' && (
                   <span className="pill ml-2" style={{ fontSize: 9, background: 'var(--success-bg)', color: 'var(--success)', borderColor: 'transparent' }}>
                     LIVE
@@ -310,13 +312,26 @@ function TileCard({
         <div className="flex gap-1 shrink-0">
           <button
             onClick={onTune}
-            className="p-1.5 rounded-md transition-colors"
-            style={{ color: 'var(--text-muted)' }}
-            title="Tune — get filter suggestions"
-            onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.color = '#0F766E')}
-            onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.color = 'var(--text-muted)')}
+            className="px-2 py-1 rounded-md text-[11px] font-semibold flex items-center gap-1 transition-all"
+            style={{
+              background: 'rgba(15,118,110,0.10)',
+              color: '#0F766E',
+              border: '1px solid rgba(15,118,110,0.25)',
+            }}
+            title="Edit this tile with the Plot Tuner agent — sort, filter, change chart type, recolor, rename axes, change fonts"
+            onMouseEnter={(e) => {
+              const el = e.currentTarget as HTMLElement
+              el.style.background = '#0F766E'
+              el.style.color = '#fff'
+            }}
+            onMouseLeave={(e) => {
+              const el = e.currentTarget as HTMLElement
+              el.style.background = 'rgba(15,118,110,0.10)'
+              el.style.color = '#0F766E'
+            }}
           >
-            <SlidersHorizontal size={13} />
+            <SlidersHorizontal size={11} />
+            Tune
           </button>
           {(tile.filters || []).length > 0 && (
             <button
@@ -363,6 +378,8 @@ function TileCard({
         >
           Loading preview…
         </div>
+      ) : isKpi ? (
+        <KpiTileRender kpi={preview.kpi} />
       ) : isTable ? (
         <InteractiveTable
           rows={preview.rows}
@@ -420,6 +437,19 @@ function TileDesigner({
   const [tableColumns, setTableColumns] = useState<string[]>(editing?.table_columns || [])
   const [tableSort, setTableSort] = useState<string>(editing?.table_default_sort || '')
   const [tableSortDesc, setTableSortDesc] = useState<boolean>(!!editing?.table_default_sort_desc)
+
+  // KPI tile config — single number computed from one column.
+  const [kpiField, setKpiField] = useState(editing?.kpi_field || '')
+  const [kpiAgg, setKpiAgg] = useState<NonNullable<PlotConfig['kpi_aggregation']>>(
+    editing?.kpi_aggregation || 'latest',
+  )
+  const [kpiWeightField, setKpiWeightField] = useState(editing?.kpi_weight_field || '')
+  const [kpiLatestField, setKpiLatestField] = useState(editing?.kpi_latest_field || '')
+  const [kpiPrefix, setKpiPrefix] = useState(editing?.kpi_prefix || '')
+  const [kpiSuffix, setKpiSuffix] = useState(editing?.kpi_suffix || '')
+  const [kpiDecimals, setKpiDecimals] = useState<number>(editing?.kpi_decimals ?? 2)
+  const [kpiScale, setKpiScale] = useState<number>(editing?.kpi_scale ?? 1)
+  const [kpiSublabel, setKpiSublabel] = useState(editing?.kpi_sublabel || '')
 
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -489,6 +519,12 @@ function TileDesigner({
     if (tileType === 'table' && tableColumns.length === 0) {
       setError('Table tiles need at least one column selected'); return
     }
+    if (tileType === 'kpi' && !kpiField) {
+      setError('KPI tiles need a metric field selected'); return
+    }
+    if (tileType === 'kpi' && kpiAgg === 'weighted_avg' && !kpiWeightField) {
+      setError('Weighted average needs a weight field'); return
+    }
     setSaving(true)
     setError(null)
     try {
@@ -509,6 +545,17 @@ function TileDesigner({
         table_default_sort_desc: tableSortDesc,
         filters: [],
         description,
+        // KPI fields — sent regardless of type so a user can flip an
+        // existing tile to/from KPI without losing the configuration.
+        kpi_field: kpiField,
+        kpi_aggregation: kpiAgg,
+        kpi_weight_field: kpiWeightField || null,
+        kpi_latest_field: kpiLatestField || null,
+        kpi_prefix: kpiPrefix,
+        kpi_suffix: kpiSuffix,
+        kpi_decimals: kpiDecimals,
+        kpi_scale: kpiScale,
+        kpi_sublabel: kpiSublabel || null,
       }
       if (isEditing) {
         // For edits, just delete + recreate to keep code simple (no PATCH endpoint yet)
@@ -586,10 +633,11 @@ function TileDesigner({
             </Field>
 
             <Field label="Tile Type">
-              <div className="grid grid-cols-2 gap-1 p-1 rounded-lg" style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border)' }}>
+              <div className="grid grid-cols-3 gap-1 p-1 rounded-lg" style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border)' }}>
                 {([
                   { k: 'plot', l: 'Plot', I: BarChart3 },
                   { k: 'table', l: 'Table', I: TableIcon },
+                  { k: 'kpi', l: 'KPI', I: Gauge },
                 ] as const).map(({ k, l, I }) => {
                   const active = tileType === k
                   return (
@@ -680,7 +728,85 @@ function TileDesigner({
               )}
             </Field>
 
-            {tileType === 'plot' ? (
+            {tileType === 'kpi' ? (
+              <>
+                <Field label="Metric Field">
+                  <select className="input" value={kpiField} onChange={(e) => setKpiField(e.target.value)}>
+                    <option value="">Select…</option>
+                    {fields.map((f) => <option key={f} value={f}>{f}</option>)}
+                  </select>
+                </Field>
+
+                <Field label="Aggregation">
+                  <select
+                    className="input"
+                    value={kpiAgg}
+                    onChange={(e) => setKpiAgg(e.target.value as any)}
+                  >
+                    <option value="latest">Latest (most recent row)</option>
+                    <option value="sum">Sum</option>
+                    <option value="avg">Average</option>
+                    <option value="weighted_avg">Weighted Average</option>
+                    <option value="min">Min</option>
+                    <option value="max">Max</option>
+                    <option value="count">Count</option>
+                  </select>
+                </Field>
+
+                {kpiAgg === 'weighted_avg' && (
+                  <Field label="Weight Field">
+                    <select className="input" value={kpiWeightField} onChange={(e) => setKpiWeightField(e.target.value)}>
+                      <option value="">Select…</option>
+                      {fields.filter((f) => f !== kpiField).map((f) => <option key={f} value={f}>{f}</option>)}
+                    </select>
+                  </Field>
+                )}
+
+                {kpiAgg === 'latest' && (
+                  <Field label="Sort Field (defines 'latest')">
+                    <select className="input" value={kpiLatestField} onChange={(e) => setKpiLatestField(e.target.value)}>
+                      <option value="">Use the metric field itself</option>
+                      {fields.filter((f) => f !== kpiField).map((f) => <option key={f} value={f}>{f}</option>)}
+                    </select>
+                  </Field>
+                )}
+
+                <div className="grid grid-cols-2 gap-2">
+                  <Field label="Prefix">
+                    <input className="input" value={kpiPrefix} onChange={(e) => setKpiPrefix(e.target.value)} placeholder="$" />
+                  </Field>
+                  <Field label="Suffix">
+                    <input className="input" value={kpiSuffix} onChange={(e) => setKpiSuffix(e.target.value)} placeholder="B / % / bps" />
+                  </Field>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <Field label="Decimals">
+                    <input
+                      type="number" min={0} max={6} className="input"
+                      value={kpiDecimals}
+                      onChange={(e) => setKpiDecimals(Math.max(0, Math.min(6, parseInt(e.target.value) || 0)))}
+                    />
+                  </Field>
+                  <Field label="Scale (× value)">
+                    <input
+                      type="number" step="0.001" className="input"
+                      value={kpiScale}
+                      onChange={(e) => setKpiScale(parseFloat(e.target.value) || 1)}
+                      placeholder="1 — use 0.001 to convert MM to B"
+                    />
+                  </Field>
+                </div>
+
+                <Field label="Sublabel (optional)">
+                  <input
+                    className="input" value={kpiSublabel}
+                    onChange={(e) => setKpiSublabel(e.target.value)}
+                    placeholder="e.g. weighted, vs prior month"
+                  />
+                </Field>
+              </>
+            ) : tileType === 'plot' ? (
               <>
                 <Field label="Chart Type">
                   <div className="grid grid-cols-3 gap-2">
@@ -804,7 +930,45 @@ function TileDesigner({
               className="panel"
               style={{ minHeight: 320, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
             >
-              {tileType === 'plot' && previewSpec ? (
+              {tileType === 'kpi' ? (
+                kpiField ? (
+                  <div className="text-center" style={{ width: '100%' }}>
+                    <div
+                      className="text-[10px] font-semibold uppercase tracking-widest mb-2"
+                      style={{ color: 'var(--text-secondary)' }}
+                    >
+                      {name || 'KPI'}
+                    </div>
+                    <div
+                      className="font-mono"
+                      style={{
+                        fontSize: 36, fontWeight: 700,
+                        color: 'var(--text-primary)',
+                        letterSpacing: '-0.02em',
+                      }}
+                    >
+                      {kpiPrefix}
+                      {(123.456 * (kpiScale || 1)).toLocaleString(undefined, {
+                        minimumFractionDigits: kpiDecimals,
+                        maximumFractionDigits: kpiDecimals,
+                      })}
+                      {kpiSuffix}
+                    </div>
+                    {kpiSublabel && (
+                      <div className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
+                        {kpiSublabel}
+                      </div>
+                    )}
+                    <div className="text-[11px] mt-3" style={{ color: 'var(--text-muted)' }}>
+                      Sample value — actual rendering uses {kpiAgg.replace('_', ' ')} of <code style={{ background: 'var(--accent-light)', padding: '0 4px', borderRadius: 3, color: 'var(--accent)' }}>{kpiField}</code> from the source you picked.
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-sm" style={{ color: 'var(--text-muted)' }}>
+                    Pick a metric field to see a live preview.
+                  </div>
+                )
+              ) : tileType === 'plot' && previewSpec ? (
                 <div style={{ width: '100%' }}>
                   <Chart spec={previewSpec} height={320} brushable />
                   <div className="text-[11px] mt-2 text-center" style={{ color: 'var(--text-muted)' }}>
@@ -865,6 +1029,41 @@ function TileDesigner({
         }
       `}</style>
     </>
+  )
+}
+
+function KpiTileRender({ kpi }: { kpi?: KpiPreview }) {
+  if (!kpi || kpi.value == null) {
+    return (
+      <div
+        className="flex items-center justify-center text-xs"
+        style={{ height: 200, color: 'var(--text-muted)' }}
+      >
+        No data — pick a metric and source.
+      </div>
+    )
+  }
+  return (
+    <div
+      className="flex flex-col items-start justify-center"
+      style={{ minHeight: 180, padding: '8px 4px' }}
+    >
+      <div
+        className="font-mono"
+        style={{
+          fontSize: 36, fontWeight: 700,
+          color: 'var(--text-primary)',
+          letterSpacing: '-0.02em', lineHeight: 1.1,
+        }}
+      >
+        {kpi.display}
+      </div>
+      {kpi.sublabel && (
+        <div className="text-xs mt-2" style={{ color: 'var(--text-muted)' }}>
+          {kpi.sublabel}
+        </div>
+      )}
+    </div>
   )
 }
 

@@ -486,13 +486,26 @@ function RunViewer({
         <div className="flex items-center gap-1">
           <button
             onClick={tuneChart}
-            className="p-1.5 rounded-md transition-colors"
-            style={{ color: 'var(--text-muted)' }}
-            title="Tune — sort, filter, change chart type, recolor, rename axes, change fonts"
-            onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.color = '#0F766E')}
-            onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.color = 'var(--text-muted)')}
+            className="px-2 py-1 rounded-md text-[11px] font-semibold flex items-center gap-1 transition-all"
+            style={{
+              background: 'rgba(15,118,110,0.10)',
+              color: '#0F766E',
+              border: '1px solid rgba(15,118,110,0.25)',
+            }}
+            title="Edit this chart with the Plot Tuner agent — sort, filter, change chart type, recolor, rename axes, change fonts"
+            onMouseEnter={(e) => {
+              const el = e.currentTarget as HTMLElement
+              el.style.background = '#0F766E'
+              el.style.color = '#fff'
+            }}
+            onMouseLeave={(e) => {
+              const el = e.currentTarget as HTMLElement
+              el.style.background = 'rgba(15,118,110,0.10)'
+              el.style.color = '#0F766E'
+            }}
           >
-            <SlidersHorizontal size={14} />
+            <SlidersHorizontal size={11} />
+            Tune
           </button>
           <button onClick={onClose} className="p-1.5 rounded-md" style={{ color: 'var(--text-muted)' }}>
             <X size={14} />

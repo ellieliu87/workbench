@@ -54,7 +54,9 @@ def register(ctx: PackContext) -> None:
     # 3) Python tools — defined in tools.py to keep this file readable.
     register_python_tools(ctx)
 
-    # 4) Datasets — bundled macro time series for portfolio analysis.
+    # 4) Datasets — bundled macro time series for portfolio analysis,
+    #    plus the demo destination-result table used by the starter
+    #    Reporting-tab dashboard below.
     ctx.attach_dataset(
         function_id="investment_portfolio",
         dataset_id="ds-macro-history",
@@ -74,6 +76,153 @@ def register(ctx: PackContext) -> None:
             "and Monte Carlo runs. Bundled sample."
         ),
         source_path=_SAMPLE_DATA / "macro_forecast.csv",
+    )
+    ctx.attach_dataset(
+        function_id="investment_portfolio",
+        dataset_id="ds-ip-results",
+        name="Portfolio Results (ip_results)",
+        description=(
+            "Long-format destination table with one row per (month × pool): "
+            "as_of_date, pool, sector, coupon_pct, market_value_mm, "
+            "book_yield_pct, oas_bps, oad_yr. Drives the starter Reporting "
+            "tiles for KPIs, NAV trajectory, sector mix, and top holdings."
+        ),
+        source_path=_SAMPLE_DATA / "ip_results.csv",
+    )
+
+    # 4b) Pre-built Reporting-tab tiles backed by ip_results. These appear
+    #     in the Reporting tab as if a user had built them; the user pins
+    #     to surface on the Overview tab. Filtered to the latest snapshot
+    #     (2026-04-01) where a point-in-time view is wanted.
+    _LATEST_DATE = "2026-04-01"
+
+    # ── KPIs (4) ──────────────────────────────────────────────────────
+    ctx.attach_plot(
+        function_id="investment_portfolio",
+        plot_id="plot-portfolio-kpi-nav",
+        config={
+            "name": "NAV",
+            "tile_type": "kpi",
+            "dataset_id": "ds-ip-results",
+            "filters": [{"field": "as_of_date", "op": "eq", "value": _LATEST_DATE}],
+            "kpi_field": "market_value_mm",
+            "kpi_aggregation": "sum",
+            "kpi_prefix": "$",
+            "kpi_suffix": "B",
+            "kpi_decimals": 2,
+            "kpi_scale": 0.001,            # MM → B
+            "kpi_sublabel": "as of latest month",
+            "description": "Total net asset value at the latest snapshot.",
+            "pinned_to_overview": True,
+        },
+    )
+    ctx.attach_plot(
+        function_id="investment_portfolio",
+        plot_id="plot-portfolio-kpi-yield",
+        config={
+            "name": "Book Yield",
+            "tile_type": "kpi",
+            "dataset_id": "ds-ip-results",
+            "filters": [{"field": "as_of_date", "op": "eq", "value": _LATEST_DATE}],
+            "kpi_field": "book_yield_pct",
+            "kpi_aggregation": "weighted_avg",
+            "kpi_weight_field": "market_value_mm",
+            "kpi_suffix": "%",
+            "kpi_decimals": 2,
+            "kpi_sublabel": "weighted by MV",
+            "description": "Market-value-weighted book yield.",
+            "pinned_to_overview": True,
+        },
+    )
+    ctx.attach_plot(
+        function_id="investment_portfolio",
+        plot_id="plot-portfolio-kpi-oad",
+        config={
+            "name": "OAD",
+            "tile_type": "kpi",
+            "dataset_id": "ds-ip-results",
+            "filters": [{"field": "as_of_date", "op": "eq", "value": _LATEST_DATE}],
+            "kpi_field": "oad_yr",
+            "kpi_aggregation": "weighted_avg",
+            "kpi_weight_field": "market_value_mm",
+            "kpi_suffix": " yr",
+            "kpi_decimals": 2,
+            "kpi_sublabel": "option-adjusted, weighted",
+            "description": "Market-value-weighted option-adjusted duration.",
+            "pinned_to_overview": True,
+        },
+    )
+    ctx.attach_plot(
+        function_id="investment_portfolio",
+        plot_id="plot-portfolio-kpi-oas",
+        config={
+            "name": "OAS",
+            "tile_type": "kpi",
+            "dataset_id": "ds-ip-results",
+            "filters": [{"field": "as_of_date", "op": "eq", "value": _LATEST_DATE}],
+            "kpi_field": "oas_bps",
+            "kpi_aggregation": "weighted_avg",
+            "kpi_weight_field": "market_value_mm",
+            "kpi_suffix": " bps",
+            "kpi_decimals": 0,
+            "kpi_sublabel": "spread, weighted",
+            "description": "Market-value-weighted option-adjusted spread.",
+            "pinned_to_overview": True,
+        },
+    )
+
+    # ── Plots (2) ─────────────────────────────────────────────────────
+    ctx.attach_plot(
+        function_id="investment_portfolio",
+        plot_id="plot-portfolio-nav-trajectory",
+        config={
+            "name": "NAV Trajectory",
+            "tile_type": "plot",
+            "chart_type": "area",
+            "dataset_id": "ds-ip-results",
+            "x_field": "as_of_date",
+            "y_fields": ["market_value_mm"],
+            "aggregation": "sum",            # group-by date, sum across pools
+            "filters": [],
+            "description": "Total portfolio NAV ($MM) over the trailing 8 months.",
+            "pinned_to_overview": True,
+        },
+    )
+    ctx.attach_plot(
+        function_id="investment_portfolio",
+        plot_id="plot-portfolio-sector-mix",
+        config={
+            "name": "Sector Allocation",
+            "tile_type": "plot",
+            "chart_type": "bar",
+            "dataset_id": "ds-ip-results",
+            "x_field": "sector",
+            "y_fields": ["market_value_mm"],
+            "aggregation": "sum",
+            "filters": [{"field": "as_of_date", "op": "eq", "value": _LATEST_DATE}],
+            "description": "Portfolio allocation by sector at the latest snapshot.",
+            "pinned_to_overview": True,
+        },
+    )
+
+    # ── Tables (1) ────────────────────────────────────────────────────
+    ctx.attach_plot(
+        function_id="investment_portfolio",
+        plot_id="plot-portfolio-top-holdings",
+        config={
+            "name": "Top Holdings",
+            "tile_type": "table",
+            "dataset_id": "ds-ip-results",
+            "table_columns": [
+                "pool", "sector", "coupon_pct", "market_value_mm",
+                "book_yield_pct", "oas_bps", "oad_yr",
+            ],
+            "table_default_sort": "market_value_mm",
+            "table_default_sort_desc": True,
+            "filters": [{"field": "as_of_date", "op": "eq", "value": _LATEST_DATE}],
+            "description": "Holdings at the latest snapshot, sorted by market value.",
+            "pinned_to_overview": True,
+        },
     )
 
     # 5) Models — BGM term-structure for both IRR and Portfolio.

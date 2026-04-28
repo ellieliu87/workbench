@@ -2,8 +2,10 @@ import { create } from 'zustand'
 import { persist, createJSONStorage } from 'zustand/middleware'
 import type { ChatMessageItem } from '@/types'
 
-export type EntityKind = 'kpi' | 'dataset' | 'scenario' | 'model' | 'run' | 'tile' | 'workflow' | null
-export type TabId = 'overview' | 'data' | 'models' | 'workflow' | 'analytics' | 'settings' | null
+export type EntityKind =
+  | 'kpi' | 'dataset' | 'scenario' | 'model' | 'run' | 'tile' | 'workflow' | 'analytic_def' | null
+export type TabId =
+  | 'overview' | 'data' | 'models' | 'workflow' | 'analytics' | 'reporting' | 'playbooks' | 'settings' | null
 
 interface ChatState {
   messages: ChatMessageItem[]

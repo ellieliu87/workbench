@@ -77,6 +77,44 @@ class WorkspaceData(BaseModel):
     insights: list[str]
 
 
+# ── Overview default-layout sharing ─────────────────────────────────────────
+# Mirrors the JSON the frontend's Export button produces. The shape is
+# intentionally permissive — the grid library evolves, and we want client
+# changes to land without forcing schema/router migrations.
+class OverviewLayoutItem(BaseModel):
+    """One react-grid-layout entry — `i` is the card id, the rest is geometry."""
+    i: str
+    x: int
+    y: int
+    w: int
+    h: int
+    minW: int | None = None
+    minH: int | None = None
+
+
+class OverviewHiddenSet(BaseModel):
+    ids: list[str] = Field(default_factory=list)
+
+
+class OverviewTextCard(BaseModel):
+    id: str
+    body: str
+
+
+class OverviewLayoutSave(BaseModel):
+    """Request body when saving a function-default layout."""
+    layout: list[OverviewLayoutItem] = Field(default_factory=list)
+    hidden: OverviewHiddenSet = Field(default_factory=OverviewHiddenSet)
+    text_cards: list[OverviewTextCard] = Field(default_factory=list)
+    saved_at: str | None = None
+
+
+class OverviewLayout(OverviewLayoutSave):
+    """Response shape — same as save body plus the routing key + audit."""
+    function_id: str
+    saved_by: str | None = None
+
+
 # ── Chat ────────────────────────────────────────────────────────────────────
 class ChatTurn(BaseModel):
     """One prior turn the frontend ships so the agent can resolve references
@@ -732,7 +770,7 @@ class PlotConfig(BaseModel):
     id: str
     function_id: str | None = None
     name: str
-    tile_type: Literal["plot", "table"] = "plot"
+    tile_type: Literal["plot", "table", "kpi"] = "plot"
     chart_type: Literal["line", "bar", "area", "pie", "scatter", "stacked_bar"] = "line"
     data_source_id: str | None = None
     dataset_id: str | None = None
@@ -749,12 +787,25 @@ class PlotConfig(BaseModel):
     filters: list[dict[str, Any]] = Field(default_factory=list)
     description: str | None = None
     style: PlotStyle = Field(default_factory=PlotStyle)
+    # For KPI tiles — read a single number from a column. `kpi_aggregation`
+    # picks how to reduce many rows to one; `weighted_avg` requires
+    # `kpi_weight_field`. The display value is `kpi_prefix + (value *
+    # kpi_scale formatted to kpi_decimals) + kpi_suffix`.
+    kpi_field: str = ""
+    kpi_aggregation: Literal["sum", "avg", "weighted_avg", "latest", "min", "max", "count"] = "sum"
+    kpi_weight_field: str | None = None
+    kpi_latest_field: str | None = None  # for "latest", which column orders rows
+    kpi_prefix: str = ""
+    kpi_suffix: str = ""
+    kpi_decimals: int = 2
+    kpi_scale: float = 1.0
+    kpi_sublabel: str | None = None
 
 
 class PlotConfigCreate(BaseModel):
     function_id: str | None = None
     name: str
-    tile_type: Literal["plot", "table"] = "plot"
+    tile_type: Literal["plot", "table", "kpi"] = "plot"
     chart_type: Literal["line", "bar", "area", "pie", "scatter", "stacked_bar"] = "line"
     data_source_id: str | None = None
     dataset_id: str | None = None
@@ -768,3 +819,12 @@ class PlotConfigCreate(BaseModel):
     aggregation: Literal["sum", "avg", "count", "min", "max", "none"] = "none"
     filters: list[dict[str, Any]] = Field(default_factory=list)
     description: str | None = None
+    kpi_field: str = ""
+    kpi_aggregation: Literal["sum", "avg", "weighted_avg", "latest", "min", "max", "count"] = "sum"
+    kpi_weight_field: str | None = None
+    kpi_latest_field: str | None = None
+    kpi_prefix: str = ""
+    kpi_suffix: str = ""
+    kpi_decimals: int = 2
+    kpi_scale: float = 1.0
+    kpi_sublabel: str | None = None

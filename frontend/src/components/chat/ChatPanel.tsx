@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import {
   Send, Sparkles, X, Cpu, LineChart, ShieldCheck, Boxes, GitBranch,
   AlertTriangle, SlidersHorizontal, LifeBuoy, Filter, Trash2,
+  Maximize2, Minimize2, ThumbsUp, ThumbsDown,
 } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -137,12 +138,39 @@ export default function ChatPanel({ open, onClose }: ChatPanelProps) {
 
   const [input, setInput] = useState('')
   const [panelWidth, setPanelWidth] = useState(400)
+  const [maximized, setMaximized] = useState(false)
+  // Sidebar takes 240px on the left (see Sidebar.tsx); maximizing claims
+  // every pixel to the right of it without covering the navigation.
+  const SIDEBAR_WIDTH = 240
+  const effectiveWidth = maximized
+    ? `calc(100vw - ${SIDEBAR_WIDTH}px)`
+    : `${panelWidth}px`
   const isDragging = useRef(false)
   const bottomRef = useRef<HTMLDivElement>(null)
+  const [feedback, setFeedback] = useState<Record<string, 'up' | 'down'>>({})
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, isLoading])
+
+  // Maximize is a transient view preference, not a sticky setting — reset
+  // it whenever the panel closes so reopening always starts at the
+  // analyst's preferred default (resizable narrow side panel).
+  useEffect(() => {
+    if (!open) setMaximized(false)
+  }, [open])
+
+  // On every open, jump to the most recent message instead of the top.
+  // Without this, reopening the panel scrolls to the very first message
+  // in the persisted thread, which buries any answer the analyst is
+  // most likely returning to read.
+  useEffect(() => {
+    if (!open) return
+    const t = setTimeout(() => {
+      bottomRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' })
+    }, 30)
+    return () => clearTimeout(t)
+  }, [open])
 
   useEffect(() => {
     const handler = (e: Event) => {
@@ -155,6 +183,7 @@ export default function ChatPanel({ open, onClose }: ChatPanelProps) {
   }, [pageContext, functionId])
 
   const handleMouseDown = (e: React.MouseEvent) => {
+    if (maximized) return  // resize via the handle is meaningless when full-width
     e.preventDefault()
     isDragging.current = true
     const startX = e.clientX
@@ -295,7 +324,7 @@ export default function ChatPanel({ open, onClose }: ChatPanelProps) {
       <div
         className="fixed right-0 top-0 bottom-0 z-50 flex flex-col"
         style={{
-          width: panelWidth,
+          width: effectiveWidth,
           background: 'var(--bg-card)',
           borderLeft: '1px solid var(--border)',
           boxShadow: '-8px 0 40px rgba(0,0,0,0.10)',
@@ -368,6 +397,24 @@ export default function ChatPanel({ open, onClose }: ChatPanelProps) {
               }}
             >
               <Trash2 size={14} />
+            </button>
+            <button
+              onClick={() => setMaximized((m) => !m)}
+              title={maximized ? 'Restore default size' : 'Maximize chat (full panel, sidebar stays visible)'}
+              className="p-1.5 rounded-lg transition-colors"
+              style={{ color: 'rgba(255,255,255,0.75)' }}
+              onMouseEnter={(e) => {
+                const el = e.currentTarget as HTMLElement
+                el.style.background = 'rgba(255,255,255,0.15)'
+                el.style.color = '#fff'
+              }}
+              onMouseLeave={(e) => {
+                const el = e.currentTarget as HTMLElement
+                el.style.background = 'transparent'
+                el.style.color = 'rgba(255,255,255,0.75)'
+              }}
+            >
+              {maximized ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
             </button>
             <button
               onClick={onClose}
@@ -588,6 +635,41 @@ export default function ChatPanel({ open, onClose }: ChatPanelProps) {
                           ))}
                         </div>
                       )}
+
+                      {/* Thumbs up/down — captured for offline LLM eval. */}
+                      <FeedbackRow
+                        msgId={msg.id}
+                        rating={feedback[msg.id]}
+                        onRate={(rating) => {
+                          // Optimistic local update; the user can still flip
+                          // it. Backend logs every submission separately.
+                          setFeedback((prev) => ({ ...prev, [msg.id]: rating }))
+                          // Find the user message that triggered this reply
+                          // for richer eval context: it's the most recent
+                          // 'user' role above this message.
+                          const idx = messages.findIndex((m) => m.id === msg.id)
+                          let userMsg: string | undefined
+                          for (let i = idx - 1; i >= 0; i--) {
+                            if (messages[i].role === 'user') {
+                              userMsg = messages[i].content
+                              break
+                            }
+                          }
+                          const snap = useChatStore.getState()
+                          api.post('/api/chat/feedback', {
+                            message_id: msg.id,
+                            rating,
+                            agent_id: msg.agent_id,
+                            agent_name: msg.agent_name,
+                            user_message: userMsg,
+                            assistant_message: msg.content,
+                            function_id: snap.functionId,
+                            tab: snap.tab,
+                            entity_kind: snap.entityKind,
+                            entity_id: snap.entityId,
+                          }).catch(() => {})
+                        }}
+                      />
                     </>
                   ) : (
                     <span style={{ fontSize: 13 }}>{msg.content}</span>
@@ -648,5 +730,74 @@ export default function ChatPanel({ open, onClose }: ChatPanelProps) {
         </div>
       </div>
     </>
+  )
+}
+
+function FeedbackRow({
+  msgId, rating, onRate,
+}: {
+  msgId: string
+  rating: 'up' | 'down' | undefined
+  onRate: (r: 'up' | 'down') => void
+}) {
+  const upActive = rating === 'up'
+  const downActive = rating === 'down'
+  return (
+    <div
+      className="flex items-center gap-1 mt-2 pt-2"
+      style={{ borderTop: '1px solid var(--border-subtle)' }}
+    >
+      <span
+        className="text-[10px] mr-1"
+        style={{ color: 'var(--text-muted)', letterSpacing: '0.04em', textTransform: 'uppercase' }}
+      >
+        Helpful?
+      </span>
+      <button
+        onClick={() => onRate('up')}
+        title={upActive ? 'You marked this helpful' : 'Mark helpful'}
+        className="p-1 rounded transition-colors"
+        style={{
+          background: upActive ? 'rgba(5,150,105,0.10)' : 'transparent',
+          color: upActive ? 'var(--success)' : 'var(--text-muted)',
+        }}
+        onMouseEnter={(e) => {
+          if (upActive) return
+          ;(e.currentTarget as HTMLElement).style.color = 'var(--success)'
+        }}
+        onMouseLeave={(e) => {
+          if (upActive) return
+          ;(e.currentTarget as HTMLElement).style.color = 'var(--text-muted)'
+        }}
+      >
+        <ThumbsUp size={11} fill={upActive ? 'currentColor' : 'none'} />
+      </button>
+      <button
+        onClick={() => onRate('down')}
+        title={downActive ? 'You marked this not helpful' : 'Mark not helpful'}
+        className="p-1 rounded transition-colors"
+        style={{
+          background: downActive ? 'rgba(220,38,38,0.10)' : 'transparent',
+          color: downActive ? 'var(--error)' : 'var(--text-muted)',
+        }}
+        onMouseEnter={(e) => {
+          if (downActive) return
+          ;(e.currentTarget as HTMLElement).style.color = 'var(--error)'
+        }}
+        onMouseLeave={(e) => {
+          if (downActive) return
+          ;(e.currentTarget as HTMLElement).style.color = 'var(--text-muted)'
+        }}
+      >
+        <ThumbsDown size={11} fill={downActive ? 'currentColor' : 'none'} />
+      </button>
+      <span
+        className="ml-auto text-[9px] font-mono"
+        style={{ color: 'var(--text-muted)', opacity: 0.6 }}
+        title={msgId}
+      >
+        {msgId.slice(-6)}
+      </span>
+    </div>
   )
 }
