@@ -31,12 +31,40 @@ _MCP_META: dict[str, dict] = {}
 
 def register_pack_mcp_servers() -> None:
     """Instantiate every pack-registered MCP server. Idempotent — already
-    registered ids are skipped on a re-call."""
+    registered ids are skipped on a re-call.
+
+    Placeholders are pure metadata — they don't need the MCP transport
+    classes from the agents SDK, so they always register first. Only the
+    live-client path requires the SDK; if that import fails (older SDK
+    fork inside a corporate proxy environment that doesn't ship the
+    `agents.mcp` submodule), placeholders still surface in the UI."""
     from packs import mcp_server_attachments
+    attachments = mcp_server_attachments()
+    log.info("[mcp] %d server attachment(s) discovered from packs.", len(attachments))
+
+    # ── Pass 1: placeholders (no SDK dependency) ──────────────────────────
+    for att in attachments:
+        sid = att["id"]
+        if sid in _MCP_META:
+            continue
+        if att.get("placeholder"):
+            _MCP_META[sid] = att
+            log.info("[mcp:%s] registered as PLACEHOLDER (pack=%s)",
+                     sid, att.get("pack_id", "?"))
+
+    # ── Pass 2: live clients (requires agents.mcp) ────────────────────────
+    live_attachments = [a for a in attachments if not a.get("placeholder") and a["id"] not in _MCP_META]
+    if not live_attachments:
+        return  # nothing left to instantiate
+
     try:
         from agents.mcp import MCPServerSse, MCPServerStdio, MCPServerStreamableHttp
-    except ImportError:
-        log.warning("agents SDK has no MCP support; pack MCP servers ignored.")
+    except ImportError as e:
+        log.warning(
+            "[mcp] agents SDK has no `agents.mcp` submodule (%s) — %d live MCP "
+            "server(s) skipped, but %d placeholder(s) still registered.",
+            e, len(live_attachments), len(_MCP_META),
+        )
         return
 
     KIND_TO_CTOR = {
@@ -45,19 +73,8 @@ def register_pack_mcp_servers() -> None:
         "streamable_http": MCPServerStreamableHttp,
     }
 
-    for att in mcp_server_attachments():
+    for att in live_attachments:
         sid = att["id"]
-        if sid in _MCP_META:
-            continue
-        # Placeholder servers are listed in the UI but no real client is
-        # built — useful for demos before the corporate URLs / tokens are
-        # available. Attaching a skill to a placeholder is a no-op at run
-        # time; the resolver returns nothing for the unconnected id.
-        if att.get("placeholder"):
-            _MCP_META[sid] = att
-            log.info("[mcp:%s] registered as PLACEHOLDER (pack=%s)",
-                     sid, att.get("pack_id", "?"))
-            continue
         ctor = KIND_TO_CTOR.get(att["kind"])
         if ctor is None:
             log.error("[mcp:%s] unknown kind '%s' — skipping", sid, att["kind"])
