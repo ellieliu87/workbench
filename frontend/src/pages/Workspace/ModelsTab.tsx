@@ -776,12 +776,15 @@ function ModelDetailPanel({
         onClick={onClose}
       />
       <div
-        className="fixed top-0 right-0 bottom-0 z-50 flex flex-col"
+        className="fixed top-0 bottom-0 z-50 flex flex-col"
         style={{
-          // Fill the entire right pane — everything to the right of the
-          // 240px sidebar. Coefficient tables and metric strips on a
-          // capped-width drawer left too much value below the fold.
-          width: 'calc(100vw - 240px)',
+          // Fill the right pane by anchoring BOTH edges: left at the
+          // sidebar's right edge (240px) and right at the viewport edge.
+          // Using `width: calc(100vw - 240px)` was wrong because `100vw`
+          // includes the scrollbar in Chrome/Firefox, which pushed the
+          // drawer's left edge ~16px behind the sidebar.
+          left: 240,
+          right: 0,
           background: 'var(--bg-card)',
           borderLeft: '1px solid var(--border)',
           boxShadow: '-12px 0 48px rgba(0,0,0,0.18)',
@@ -987,7 +990,11 @@ function Modal({
         className="fixed top-1/2 left-1/2 z-50 flex flex-col"
         style={{
           width: wide ? 'min(720px, 96vw)' : 'min(560px, 96vw)',
-          maxHeight: '90vh',
+          // Take nearly the whole viewport height — a small 8px breathing
+          // margin top + bottom (effectively 96vh tall) so feature
+          // checklists and metric tables don't have to scroll inside the
+          // already-scrollable body.
+          maxHeight: 'calc(100vh - 16px)',
           transform: 'translate(-50%, -50%)',
           background: 'var(--bg-card)',
           border: '1px solid var(--border)',

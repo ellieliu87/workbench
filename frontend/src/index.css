@@ -81,8 +81,12 @@ input:focus, select:focus, textarea:focus, button:focus-visible {
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent);
 }
 
+/* Opacity-only fade — using a transform here makes the wrapper a
+   containing block for any fixed-positioned descendants (CSS spec),
+   so right-rail drawers like the model preview rendered against the
+   wrapper's height instead of the viewport's. Stick to opacity. */
 @keyframes fadeIn {
-  from { opacity: 0; transform: translateY(6px); }
-  to   { opacity: 1; transform: translateY(0); }
+  from { opacity: 0; }
+  to   { opacity: 1; }
 }
-.animate-fade-in { animation: fadeIn 0.3s ease-out both; }
+.animate-fade-in { animation: fadeIn 0.25s ease-out both; }
