@@ -338,13 +338,21 @@ export default function ChatPanel({ open, onClose }: ChatPanelProps) {
           onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = 'transparent')}
         />
 
-        {/* Header — reflects the most recent responding agent */}
+        {/* Header — reflects the most recent responding agent. While a
+            request is in flight we explicitly drop into a neutral
+            "Thinking…" state instead of showing the previous agent's
+            name, which previously read like the *new* request was
+            being handled by the *old* agent. */}
         {(() => {
           const latest = [...messages].reverse().find((m) => m.role === 'assistant')
-          const agentName = latest?.agent_name || 'CMA Agent'
-          const agentColor = latest?.agent_color || 'var(--accent)'
-          const HeaderIcon = (latest?.agent_icon && AGENT_ICON[latest.agent_icon]) || Sparkles
-          const subline = latest?.agent_id || (functionId ? functionId.replace(/_/g, ' ') : 'self-serve')
+          const agentName = isLoading ? 'Thinking…' : (latest?.agent_name || 'CMA Agent')
+          const agentColor = isLoading ? 'var(--text-secondary)' : (latest?.agent_color || 'var(--accent)')
+          const HeaderIcon = isLoading
+            ? Sparkles
+            : ((latest?.agent_icon && AGENT_ICON[latest.agent_icon]) || Sparkles)
+          const subline = isLoading
+            ? 'routing…'
+            : (latest?.agent_id || (functionId ? functionId.replace(/_/g, ' ') : 'self-serve'))
           return (
         <div
           className="flex items-center justify-between px-5 py-4"
@@ -554,66 +562,10 @@ export default function ChatPanel({ open, onClose }: ChatPanelProps) {
                           {msg.content}
                         </ReactMarkdown>
                       </div>
-                      {msg.trace && msg.trace.length > 0 && (() => {
-                        // Pair each tool_call with its tool_output (if present)
-                        // so we can render a single ✓-line per actioned step.
-                        // Pure-explanation message_only traces are skipped.
-                        const calls = msg.trace.filter((s) => s.kind === 'tool_call')
-                        const outputs = msg.trace.filter((s) => s.kind === 'tool_output')
-                        if (calls.length === 0) return null
-                        const outByName = new Map<string, typeof outputs[number]>()
-                        for (const o of outputs) if (o.tool_name) outByName.set(o.tool_name, o)
-                        return (
-                          <div
-                            className="mt-2 pt-2"
-                            style={{ borderTop: '1px solid var(--border-subtle)' }}
-                          >
-                            <div className="text-[10px] uppercase tracking-widest mb-1" style={{ color: 'var(--text-muted)' }}>
-                              Steps taken ({calls.length})
-                            </div>
-                            <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-                              {calls.map((c, i) => {
-                                const out = c.tool_name ? outByName.get(c.tool_name) : undefined
-                                const errored = !!(out?.detail && out.detail.includes('"error"'))
-                                return (
-                                  <li
-                                    key={i}
-                                    className="flex items-start gap-1.5"
-                                    style={{
-                                      fontSize: 11,
-                                      color: errored ? 'var(--error)' : 'var(--text-secondary)',
-                                      textDecoration: errored ? 'none' : 'line-through',
-                                      textDecorationColor: 'var(--text-muted)',
-                                      opacity: errored ? 1 : 0.85,
-                                      marginBottom: 2,
-                                    }}
-                                  >
-                                    <span style={{ color: errored ? 'var(--error)' : 'var(--success)' }}>
-                                      {errored ? '✕' : '✓'}
-                                    </span>
-                                    <span className="font-mono">{c.tool_name}</span>
-                                    {!errored && c.detail && (
-                                      <span style={{ color: 'var(--text-muted)', textDecoration: 'none', display: 'inline' }}>
-                                        — {(() => {
-                                          try {
-                                            const args = JSON.parse(c.detail)
-                                            return Object.entries(args)
-                                              .filter(([k]) => k !== 'target_id' && k !== 'target_kind')
-                                              .map(([k, v]) => `${k}: ${typeof v === 'object' ? JSON.stringify(v) : v}`)
-                                              .join(', ')
-                                          } catch {
-                                            return c.detail.slice(0, 80)
-                                          }
-                                        })()}
-                                      </span>
-                                    )}
-                                  </li>
-                                )
-                              })}
-                            </ul>
-                          </div>
-                        )
-                      })()}
+                      {/* "Steps taken" trace summary intentionally hidden —
+                          the trace is still captured server-side and shipped
+                          on the message for downstream eval, but the chat
+                          panel keeps the response clean. */}
                       {msg.actions && msg.actions.length > 0 && (
                         <div className="flex flex-wrap gap-1.5 mt-2 pt-2" style={{ borderTop: '1px solid var(--border-subtle)' }}>
                           {msg.actions.map((a, i) => (

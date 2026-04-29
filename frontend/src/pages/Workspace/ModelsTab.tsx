@@ -778,7 +778,10 @@ function ModelDetailPanel({
       <div
         className="fixed top-0 right-0 bottom-0 z-50 flex flex-col"
         style={{
-          width: 'min(880px, 96vw)',
+          // Fill the entire right pane — everything to the right of the
+          // 240px sidebar. Coefficient tables and metric strips on a
+          // capped-width drawer left too much value below the fold.
+          width: 'calc(100vw - 240px)',
           background: 'var(--bg-card)',
           borderLeft: '1px solid var(--border)',
           boxShadow: '-12px 0 48px rgba(0,0,0,0.18)',

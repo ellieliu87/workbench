@@ -66,10 +66,18 @@ export function computeSteps(nodes: RFNode<NodeData>[], edges: Edge[]): StepInfo
     return d
   }
 
+  // Secondary sort key: insertion order (the order the user added the step
+  // to the workflow). Sorting alphabetically by id used the random suffix
+  // baked into the node id, so new steps could land at the top by accident
+  // — now they land below every step at the same depth, in add-order, and
+  // the user can drag-reorder within a depth level.
+  const insertionOrder = new Map<string, number>()
+  modelNodes.forEach((n, i) => insertionOrder.set(n.id, i))
+
   const sorted = [...modelNodes].sort((a, b) => {
     const da = depthOf(a.id), db = depthOf(b.id)
     if (da !== db) return da - db
-    return a.id.localeCompare(b.id)
+    return (insertionOrder.get(a.id) ?? 0) - (insertionOrder.get(b.id) ?? 0)
   })
 
   return sorted.map((n, i) => {

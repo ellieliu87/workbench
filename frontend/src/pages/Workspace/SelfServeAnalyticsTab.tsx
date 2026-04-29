@@ -822,8 +822,8 @@ function DefinitionEditor({
   return (
     <>
       <div
-        className="fixed inset-0 z-40 flex items-center justify-center"
-        style={{ background: 'rgba(11,15,25,0.45)', padding: 24 }}
+        className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto"
+        style={{ background: 'rgba(11,15,25,0.45)', padding: '32px 24px' }}
         onClick={onClose}
       >
       <div
@@ -831,7 +831,12 @@ function DefinitionEditor({
         className="z-50 flex flex-col rounded-xl overflow-hidden"
         style={{
           width: 'min(960px, 100%)',
-          maxHeight: 'min(820px, 92vh)',
+          // 64px = the wrapper's 32px top + 32px bottom padding. Without
+          // subtracting it, `92vh` plus the padding overflowed the
+          // viewport on shorter screens and the modal header got pushed
+          // above the visible area. Anchoring at the top (items-start +
+          // top padding) also guarantees the title is always visible.
+          maxHeight: 'min(820px, calc(100vh - 64px))',
           background: 'var(--bg-card)',
           border: '1px solid var(--border)',
           boxShadow: '0 24px 72px rgba(0,0,0,0.32)',

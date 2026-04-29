@@ -20,17 +20,47 @@ const WORKSPACE_TABS = [
   { id: 'reporting', label: 'Reporting', icon: FileBarChart },
 ] as const
 
+// Remember the last workspace the user visited so the sidebar's tab nav
+// stays visible when they pop over to Settings (or any non-workspace
+// route). Persisted to sessionStorage so a hard reload mid-session keeps
+// the menu; clears on tab close.
+const LAST_FN_KEY = 'cma:sidebar:lastFnId'
+
+function loadLastFnId(): string | null {
+  try { return sessionStorage.getItem(LAST_FN_KEY) } catch { return null }
+}
+function saveLastFnId(id: string | null) {
+  try {
+    if (id) sessionStorage.setItem(LAST_FN_KEY, id)
+    else sessionStorage.removeItem(LAST_FN_KEY)
+  } catch {}
+}
+
 export default function Sidebar() {
   const { username, role, department, logout } = useAuthStore()
   const navigate = useNavigate()
   const location = useLocation()
   const [activeFunction, setActiveFunction] = useState<BusinessFunction | null>(null)
+  const [lastFnId, setLastFnId] = useState<string | null>(() => loadLastFnId())
 
-  // Detect which function (if any) the user is currently in.
+  // The function (if any) the user is currently inside.
   const fnMatch = location.pathname.match(/^\/workspace\/([^/]+)/)
-  const fnId = fnMatch ? fnMatch[1] : null
+  const currentFnId = fnMatch ? fnMatch[1] : null
   const tabMatch = location.pathname.match(/^\/workspace\/[^/]+\/([^/]+)/)
-  const activeTab = tabMatch ? tabMatch[1] : 'overview'
+  const currentTab = tabMatch ? tabMatch[1] : (currentFnId ? 'overview' : null)
+
+  // The function whose tabs we should display. When the user navigates
+  // away from /workspace (e.g. Settings) we keep the previous workspace
+  // visible so the analyst can pop back with one click instead of
+  // re-picking from Home.
+  const fnId = currentFnId || lastFnId
+
+  // Track the last workspace seen so it sticks across tab changes.
+  useEffect(() => {
+    if (!currentFnId || currentFnId === lastFnId) return
+    setLastFnId(currentFnId)
+    saveLastFnId(currentFnId)
+  }, [currentFnId, lastFnId])
 
   useEffect(() => {
     if (!fnId) { setActiveFunction(null); return }
@@ -95,7 +125,7 @@ export default function Sidebar() {
                 to={`/workspace/${fnId}/${id}`}
                 label={label}
                 icon={icon}
-                active={activeTab === id}
+                active={currentTab === id}
                 accent={activeFunction?.color}
               />
             ))}

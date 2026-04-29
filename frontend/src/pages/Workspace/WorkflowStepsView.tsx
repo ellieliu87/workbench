@@ -159,6 +159,24 @@ export default function WorkflowStepsView({
     setEdges(() => next.edges)
   }
 
+  // Drag-to-reorder steps. Reorders the underlying `nodes` array so
+  // computeSteps' insertion-order secondary sort lays them out in the
+  // user-chosen order (subject to dependency depth). Steps that depend
+  // on a later step get clamped back to the depth-correct slot.
+  const moveStep = (sourceNodeId: string, targetNodeId: string) => {
+    if (sourceNodeId === targetNodeId) return
+    setNodes((ns) => {
+      const src = ns.findIndex((n) => n.id === sourceNodeId)
+      const dst = ns.findIndex((n) => n.id === targetNodeId)
+      if (src === -1 || dst === -1) return ns
+      const next = [...ns]
+      const [moved] = next.splice(src, 1)
+      const insertAt = next.findIndex((n) => n.id === targetNodeId)
+      next.splice(insertAt, 0, moved)
+      return next
+    })
+  }
+
   const replaceStepModel = (stepNodeId: string, newModelId: string) => {
     const m = models.find((x) => x.id === newModelId)
     if (!m) return
@@ -264,6 +282,7 @@ export default function WorkflowStepsView({
               }}
               onReplaceModel={(modelId) => replaceStepModel(s.nodeId, modelId)}
               onRemoveStep={() => removeStep(s.nodeId)}
+              onMoveStep={moveStep}
             />
           ))}
         </div>
@@ -300,7 +319,7 @@ export default function WorkflowStepsView({
 function StepCard({
   step, allSteps, downstreamSteps, models, datasets, scenarios,
   onAddInput, onRemoveInput, onAddDestination, onRemoveDestination,
-  onConfigureDestination, onReplaceModel, onRemoveStep,
+  onConfigureDestination, onReplaceModel, onRemoveStep, onMoveStep,
 }: {
   step: StepInfo
   allSteps: StepInfo[]
@@ -315,9 +334,11 @@ function StepCard({
   onConfigureDestination: (destNodeId: string) => void
   onReplaceModel: (modelId: string) => void
   onRemoveStep: () => void
+  onMoveStep: (sourceNodeId: string, targetNodeId: string) => void
 }) {
   const [showInputPicker, setShowInputPicker] = useState(false)
   const [showDestPicker, setShowDestPicker] = useState(false)
+  const [dragOver, setDragOver] = useState<'above' | 'below' | null>(null)
 
   const usedInputIds = new Set(step.inputs.map((i) => i.id))
   const earlierSteps = allSteps.filter((s) => s.number < step.number)
@@ -325,13 +346,57 @@ function StepCard({
 
   return (
     <div
-      className="panel"
+      onDragOver={(e) => {
+        // Only react to drags from another step card. dataTransfer.types
+        // is a DOMStringList that includes our custom mime when the source
+        // is a step.
+        if (!e.dataTransfer.types.includes('application/x-cma-step-id')) return
+        e.preventDefault()
+        const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+        const midY = rect.top + rect.height / 2
+        setDragOver(e.clientY < midY ? 'above' : 'below')
+      }}
+      onDragLeave={() => setDragOver(null)}
+      onDrop={(e) => {
+        const sourceId = e.dataTransfer.getData('application/x-cma-step-id')
+        setDragOver(null)
+        if (!sourceId || sourceId === step.nodeId) return
+        e.preventDefault()
+        onMoveStep(sourceId, step.nodeId)
+      }}
+      className="panel relative"
       style={{
         padding: 14,
         borderColor: status === 'warning' ? 'var(--warning)' : 'var(--border)',
+        // Indicator strip when a drag is hovering this card.
+        boxShadow: dragOver
+          ? `inset 0 ${dragOver === 'above' ? 3 : -3}px 0 var(--accent)`
+          : undefined,
       }}
     >
       <div className="flex items-start gap-3">
+        {/* Drag handle */}
+        <div
+          draggable
+          onDragStart={(e) => {
+            e.dataTransfer.setData('application/x-cma-step-id', step.nodeId)
+            e.dataTransfer.effectAllowed = 'move'
+          }}
+          onDragEnd={() => setDragOver(null)}
+          className="flex items-center justify-center shrink-0 self-stretch transition-colors"
+          style={{
+            color: 'var(--text-muted)',
+            cursor: 'grab',
+            width: 16,
+            marginLeft: -4,
+          }}
+          title="Drag to reorder"
+          onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.color = 'var(--accent)')}
+          onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.color = 'var(--text-muted)')}
+        >
+          <GripVertical size={14} />
+        </div>
+
         {/* Step number badge */}
         <div
           className="w-9 h-9 rounded-lg flex items-center justify-center shrink-0 font-mono text-sm font-bold"

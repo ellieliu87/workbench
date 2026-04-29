@@ -83,6 +83,7 @@ export default function ReportsTab({ functionId, functionName, onAskAgent, onCon
           id: p.id, title: p.name, type: p.chart_type,
           data: r.data.preview_data, x_key: p.x_field, y_keys: p.y_fields,
           description: p.description || null,
+          style: r.data.plot?.style || p.style || null,
         }
         const cols: string[] =
           (r.data.columns || []).map((c: any) => c.name) ||
@@ -126,6 +127,7 @@ export default function ReportsTab({ functionId, functionName, onAskAgent, onCon
           x_key: p.x_field,
           y_keys: p.y_fields,
           description: p.description || null,
+          style: r.data.plot?.style || p.style || null,
         }
         const cols: string[] =
           (r.data.columns || []).map((c: any) => c.name) ||

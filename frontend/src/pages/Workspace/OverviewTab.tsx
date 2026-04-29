@@ -383,6 +383,7 @@ export default function OverviewTab({ functionId, onAskAgent, onContextChange }:
           id: p.id, title: p.name, type: p.chart_type,
           data: r.data.preview_data, x_key: p.x_field, y_keys: p.y_fields,
           description: p.description || null,
+          style: r.data.plot?.style || p.style || null,
         }
         const cols = (r.data.columns || []).map((c: any) => c.name) ||
           (r.data.preview_data[0] ? Object.keys(r.data.preview_data[0]) : [])

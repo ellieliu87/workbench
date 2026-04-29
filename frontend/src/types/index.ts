@@ -18,6 +18,19 @@ export interface KpiCard {
   sublabel?: string | null
 }
 
+export interface PlotStyle {
+  palette?: string[]
+  font_size?: number | null
+  title?: string | null
+  x_axis_label?: string | null
+  y_axis_label?: string | null
+  number_format?: string | null
+  label_overrides?: Record<string, string>
+  legend_position?: 'top' | 'bottom' | 'right' | 'left' | 'none' | null
+  sort_field?: string | null
+  sort_desc?: boolean
+}
+
 export interface ChartSpec {
   id: string
   title: string
@@ -26,6 +39,10 @@ export interface ChartSpec {
   x_key: string
   y_keys: string[]
   description?: string | null
+  // Style is the plot-tuner's mutation surface — palette, font sizes,
+  // legend position, axis labels, sort. The Chart renderer reads it on
+  // every render so agent edits show up live.
+  style?: PlotStyle | null
 }
 
 export interface TableSpec {
