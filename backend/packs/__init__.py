@@ -72,6 +72,7 @@ _PYTHON_TOOL_SEEDS: list[dict] = []           # consumed by routers/tools.py
 _DATASET_ATTACHMENTS: list[dict] = []         # consumed by routers/datasets.py
 _MODEL_ATTACHMENTS: list[dict] = []           # consumed by routers/models_registry.py
 _PLOT_ATTACHMENTS: list[dict] = []            # consumed by routers/plots.py
+_MCP_SERVER_ATTACHMENTS: list[dict] = []      # consumed by cof/orchestrator.py
 
 
 # ── PackContext (the API a pack uses) ──────────────────────────────────────
@@ -150,6 +151,51 @@ class PackContext:
             "name": name,
             "description": description,
             "source_path": Path(source_path),
+            "pack_id": self.pack.id,
+        })
+
+    # ── MCP server attachments ─────────────────────────────────────────────
+    def register_mcp_server(
+        self,
+        *,
+        id: str,
+        label: str,
+        kind: str,                       # "stdio" | "sse" | "streamable_http"
+        params: dict,                    # passed to the agents SDK constructor
+        description: str = "",
+        tool_filter: list[str] | None = None,
+        placeholder: bool = False,       # True = list in UI but don't construct a client
+    ) -> None:
+        """Register an MCP server the platform's agents can attach to.
+
+        At startup the orchestrator instantiates one client per registered
+        server (e.g. `MCPServerStreamableHttp(params=...)`) and indexes them
+        by `id`. Skills opt in by listing the server id in their YAML
+        frontmatter under `mcp_servers:`. The agents SDK advertises the
+        server's tool catalog to the model alongside any in-process Python
+        tools the skill also declares — the model picks freely.
+
+        Args:
+          id:          stable short id used in skill YAML, e.g. "github".
+          label:       human-readable name for the Settings UI.
+          kind:        transport — "stdio" for a local subprocess MCP server,
+                       "sse" or "streamable_http" for HTTP-based corporate
+                       MCP servers.
+          params:      dict passed through to the agents SDK transport class
+                       (e.g. {"url": "https://...", "headers": {...}}).
+                       Resolve secrets from os.environ inside the pack so
+                       they aren't committed.
+          description: shown next to the toggle in Settings → MCP servers.
+          tool_filter: optional allowlist of MCP tool names. None = all.
+        """
+        _MCP_SERVER_ATTACHMENTS.append({
+            "id": id,
+            "label": label,
+            "kind": kind,
+            "params": dict(params),
+            "description": description,
+            "tool_filter": list(tool_filter) if tool_filter else None,
+            "placeholder": placeholder,
             "pack_id": self.pack.id,
         })
 
@@ -264,6 +310,10 @@ def model_attachments() -> list[dict]:
 
 def plot_attachments() -> list[dict]:
     return list(_PLOT_ATTACHMENTS)
+
+
+def mcp_server_attachments() -> list[dict]:
+    return list(_MCP_SERVER_ATTACHMENTS)
 
 
 # ── Authorization helper ───────────────────────────────────────────────────

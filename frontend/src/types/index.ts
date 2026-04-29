@@ -120,6 +120,7 @@ export interface AgentSkill {
   enabled: boolean
   instructions?: string | null
   tools: string[]
+  mcp_servers?: string[]
   source?: 'builtin' | 'user' | 'pack'
   pack_id?: string | null
 }

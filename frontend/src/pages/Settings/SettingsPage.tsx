@@ -1,13 +1,15 @@
 import { useNavigate, useParams } from 'react-router-dom'
-import { Database, Wrench, Code2 } from 'lucide-react'
+import { Database, Wrench, Code2, Server } from 'lucide-react'
 import DataSourcesTab from './DataSourcesTab'
 import SkillsTab from './SkillsTab'
 import ToolsTab from './ToolsTab'
+import McpServersTab from './McpServersTab'
 
 const TABS = [
   { id: 'datasources', label: 'Data Sources', icon: Database },
   { id: 'skills',      label: 'Agent Skills', icon: Wrench },
   { id: 'tools',       label: 'Python Tools', icon: Code2 },
+  { id: 'mcp',         label: 'MCP Servers',  icon: Server },
 ] as const
 
 export default function SettingsPage() {
@@ -53,6 +55,7 @@ export default function SettingsPage() {
       {active === 'datasources' && <DataSourcesTab />}
       {active === 'skills' && <SkillsTab />}
       {active === 'tools' && <ToolsTab />}
+      {active === 'mcp' && <McpServersTab />}
     </div>
   )
 }

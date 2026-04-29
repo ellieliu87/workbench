@@ -34,11 +34,21 @@ const EMPTY_SKILL: AgentSkill = {
   enabled: true,
   instructions: '',
   tools: [],
+  mcp_servers: [],
+}
+
+interface McpServerLite {
+  id: string
+  label: string
+  description: string
+  placeholder?: boolean
+  connected: boolean
 }
 
 export default function SkillsTab() {
   const [skills, setSkills] = useState<AgentSkill[]>([])
   const [tools, setTools] = useState<AvailableTool[]>([])
+  const [mcpServers, setMcpServers] = useState<McpServerLite[]>([])
   const [loading, setLoading] = useState(true)
   const [editor, setEditor] = useState<EditorState>({ open: false, mode: 'create', skill: null })
   const fileRef = useRef<HTMLInputElement>(null)
@@ -48,8 +58,13 @@ export default function SkillsTab() {
     Promise.all([
       api.get<AgentSkill[]>('/api/skills'),
       api.get<AvailableTool[]>('/api/skills/_available_tools'),
+      api.get<McpServerLite[]>('/api/mcp_servers').catch(() => ({ data: [] })),
     ])
-      .then(([s, t]) => { setSkills(s.data); setTools(t.data) })
+      .then(([s, t, m]) => {
+        setSkills(s.data)
+        setTools(t.data)
+        setMcpServers(m.data || [])
+      })
       .finally(() => setLoading(false))
   }
 
@@ -79,6 +94,7 @@ export default function SkillsTab() {
         category: editor.skill.category,
         instructions: editor.skill.instructions,
         tools: editor.skill.tools,
+        mcp_servers: editor.skill.mcp_servers || [],
       })
     } else {
       await api.patch(`/api/skills/${editor.skill.id}`, {
@@ -87,6 +103,7 @@ export default function SkillsTab() {
         category: editor.skill.category,
         instructions: editor.skill.instructions,
         tools: editor.skill.tools,
+        mcp_servers: editor.skill.mcp_servers || [],
         enabled: editor.skill.enabled,
       })
     }
@@ -130,6 +147,13 @@ export default function SkillsTab() {
     if (!editor.skill) return
     const has = editor.skill.tools.includes(name)
     updateField('tools', has ? editor.skill.tools.filter((t) => t !== name) : [...editor.skill.tools, name])
+  }
+
+  const toggleMcp = (id: string) => {
+    if (!editor.skill) return
+    const cur = editor.skill.mcp_servers || []
+    const has = cur.includes(id)
+    updateField('mcp_servers', has ? cur.filter((m) => m !== id) : [...cur, id])
   }
 
   return (
@@ -363,10 +387,12 @@ export default function SkillsTab() {
         <SkillEditor
           state={editor}
           tools={tools}
+          mcpServers={mcpServers}
           onClose={closeEditor}
           onSave={save}
           onChange={updateField}
           onToggleTool={toggleTool}
+          onToggleMcp={toggleMcp}
           onInsertTemplate={insertTemplate}
         />
       )}
@@ -377,14 +403,16 @@ export default function SkillsTab() {
 interface EditorProps {
   state: EditorState
   tools: AvailableTool[]
+  mcpServers: McpServerLite[]
   onClose: () => void
   onSave: () => void
   onChange: <K extends keyof AgentSkill>(k: K, v: AgentSkill[K]) => void
   onToggleTool: (name: string) => void
+  onToggleMcp: (id: string) => void
   onInsertTemplate: () => void
 }
 
-function SkillEditor({ state, tools, onClose, onSave, onChange, onToggleTool, onInsertTemplate }: EditorProps) {
+function SkillEditor({ state, tools, mcpServers, onClose, onSave, onChange, onToggleTool, onToggleMcp, onInsertTemplate }: EditorProps) {
   const s = state.skill!
   return (
     <>
@@ -486,6 +514,12 @@ function SkillEditor({ state, tools, onClose, onSave, onChange, onToggleTool, on
             allTools={tools}
             selected={s.tools}
             onToggle={onToggleTool}
+          />
+
+          <McpPicker
+            servers={mcpServers}
+            selected={s.mcp_servers || []}
+            onToggle={onToggleMcp}
           />
         </div>
 
@@ -758,6 +792,128 @@ function ToolPicker({
             )}
           </div>
         )}
+      </div>
+    </div>
+  )
+}
+
+// ── MCP server picker — checkbox grid of pack-registered MCP servers ─────
+function McpPicker({
+  servers, selected, onToggle,
+}: {
+  servers: McpServerLite[]
+  selected: string[]
+  onToggle: (id: string) => void
+}) {
+  if (servers.length === 0) {
+    return (
+      <div className="mt-5">
+        <div
+          className="text-[10px] font-semibold uppercase tracking-widest mb-1.5"
+          style={{ color: 'var(--text-secondary)' }}
+        >
+          MCP Servers
+        </div>
+        <div
+          className="panel text-xs"
+          style={{ padding: 10, color: 'var(--text-muted)', borderStyle: 'dashed' }}
+        >
+          No MCP servers registered. Configure them under{' '}
+          <strong>Settings → MCP Servers</strong> (or set the
+          <code style={{
+            background: 'var(--bg-elevated)', padding: '0 4px',
+            borderRadius: 3, fontSize: 10.5, fontFamily: 'JetBrains Mono, monospace',
+            color: 'var(--accent)', margin: '0 2px',
+          }}>CMA_MCP_*_URL</code>
+          env vars).
+        </div>
+      </div>
+    )
+  }
+  return (
+    <div className="mt-5">
+      <div className="flex items-center justify-between mb-1.5">
+        <div
+          className="text-[10px] font-semibold uppercase tracking-widest"
+          style={{ color: 'var(--text-secondary)' }}
+        >
+          MCP Servers ({selected.length} attached)
+        </div>
+        <div className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
+          Each attached server's tool catalog is advertised to the model.
+        </div>
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+        {servers.map((srv) => {
+          const checked = selected.includes(srv.id)
+          return (
+            <button
+              key={srv.id}
+              onClick={() => onToggle(srv.id)}
+              // Placeholder servers are selectable so the demo can show
+              // skills attached to them; only true offline (registered
+              // but failed to init) is disabled.
+              disabled={!srv.connected && !srv.placeholder}
+              className="text-left rounded-lg p-3 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              style={{
+                background: checked ? 'var(--accent-light)' : 'var(--bg-elevated)',
+                border: `1px solid ${checked ? 'var(--accent)' : 'var(--border)'}`,
+              }}
+              title={
+                srv.placeholder
+                  ? 'Demo placeholder — attaching is fine for the demo, but no real client is connected.'
+                  : srv.connected
+                    ? srv.description
+                    : 'Server is offline — set its URL env var.'
+              }
+            >
+              <div className="flex items-start gap-2">
+                <div
+                  className="w-4 h-4 mt-0.5 rounded flex items-center justify-center shrink-0"
+                  style={{
+                    background: checked ? 'var(--accent)' : 'var(--bg-card)',
+                    border: `1px solid ${checked ? 'var(--accent)' : 'var(--border)'}`,
+                  }}
+                >
+                  {checked && (
+                    <svg width="10" height="10" viewBox="0 0 16 16" fill="none">
+                      <path d="M3 8l3 3 7-7" stroke="#fff" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  )}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-1.5">
+                    <span
+                      className="text-sm font-semibold truncate"
+                      style={{ color: checked ? 'var(--accent)' : 'var(--text-primary)' }}
+                    >
+                      {srv.label}
+                    </span>
+                    <span
+                      className="px-1.5 py-0.5 rounded font-mono shrink-0"
+                      style={{
+                        fontSize: 9,
+                        letterSpacing: '0.05em',
+                        textTransform: 'uppercase',
+                        background: srv.placeholder
+                          ? 'rgba(217,119,6,0.12)'
+                          : (srv.connected ? 'var(--success-bg)' : 'var(--error-bg)'),
+                        color: srv.placeholder
+                          ? '#D97706'
+                          : (srv.connected ? 'var(--success)' : 'var(--error)'),
+                      }}
+                    >
+                      {srv.placeholder ? 'Placeholder' : (srv.connected ? 'Live' : 'Offline')}
+                    </span>
+                  </div>
+                  <div className="text-[11px] mt-0.5" style={{ color: 'var(--text-muted)' }}>
+                    {srv.description || `mcp_servers: [${srv.id}]`}
+                  </div>
+                </div>
+              </div>
+            </button>
+          )
+        })}
       </div>
     </div>
   )

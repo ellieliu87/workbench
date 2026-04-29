@@ -199,6 +199,7 @@ class AgentSkill(BaseModel):
     enabled: bool
     instructions: str | None = None
     tools: list[str] = Field(default_factory=list)
+    mcp_servers: list[str] = Field(default_factory=list)
     source: Literal["builtin", "user", "pack"] = "builtin"
     pack_id: str | None = None  # populated when source == 'pack'
 
@@ -209,6 +210,7 @@ class AgentSkillCreate(BaseModel):
     category: Literal["analytical", "reporting", "data", "risk", "custom"]
     instructions: str | None = None
     tools: list[str] = Field(default_factory=list)
+    mcp_servers: list[str] = Field(default_factory=list)
 
 
 class AgentSkillUpdate(BaseModel):
@@ -217,6 +219,7 @@ class AgentSkillUpdate(BaseModel):
     category: Literal["analytical", "reporting", "data", "risk", "custom"] | None = None
     instructions: str | None = None
     tools: list[str] | None = None
+    mcp_servers: list[str] | None = None
     enabled: bool | None = None
 
 

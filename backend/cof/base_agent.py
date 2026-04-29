@@ -244,11 +244,18 @@ class CofBaseAgent:
             self._model = OpenAIChatCompletionsModel(
                 model=skill.model, openai_client=self._client,
             )
+            # MCP servers the skill opted into via `mcp_servers:` in YAML.
+            # Resolved against the runtime registry built at startup from
+            # pack registrations (see cof/mcp_registry.py). Unknown ids
+            # are dropped with a warning so a typo doesn't kill the agent.
+            from cof.mcp_registry import resolve_mcp_servers_for_skill
+            mcp_servers = resolve_mcp_servers_for_skill(skill.mcp_servers)
             self._agent = Agent(
                 name=skill.name,
                 instructions=skill.system_prompt,
                 model=self._model,
                 tools=self._function_tools,
+                mcp_servers=mcp_servers,
             )
             self._mode = "agents_sdk"
             log.info("CofBaseAgent[%s] initialized with model %s", skill.name, skill.model)

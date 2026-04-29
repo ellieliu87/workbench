@@ -53,6 +53,7 @@ def _to_schema(s: AgentSkill) -> AgentSkillSchema:
         enabled=True,
         instructions=s.system_prompt,
         tools=s.tools,
+        mcp_servers=s.mcp_servers,
         source=s.source,  # type: ignore[arg-type]
         pack_id=s.pack_id,
     )
@@ -212,6 +213,10 @@ async def create_skill(req: AgentSkillCreate, _: str = Depends(get_current_user)
     """Compose a new skill from form fields (turns into a markdown file under skills_user/)."""
     skill_name = req.name.lower().replace(" ", "-")
     body = req.instructions or f"# {req.name}\n\nDescribe how this agent should behave."
+    mcp_block = (
+        "mcp_servers:\n" + "\n".join(f"  - {m}" for m in req.mcp_servers) + "\n"
+        if req.mcp_servers else ""
+    )
     md = f"""---
 name: {skill_name}
 description: {req.description}
@@ -220,7 +225,7 @@ max_tokens: 1024
 icon: sparkles
 tools:
 {chr(10).join(f'  - {t}' for t in req.tools) if req.tools else '  - get_workspace'}
----
+{mcp_block}---
 
 {body}
 """
@@ -257,6 +262,11 @@ async def update_skill(skill_id: str, req: AgentSkillUpdate, _: str = Depends(ge
     new_desc = req.description or s.description
     new_instructions = req.instructions or s.system_prompt
     new_tools = req.tools if req.tools is not None else s.tools
+    new_mcp = req.mcp_servers if req.mcp_servers is not None else s.mcp_servers
+    mcp_block = (
+        "mcp_servers:\n" + "\n".join(f"  - {m}" for m in new_mcp) + "\n"
+        if new_mcp else ""
+    )
     md = f"""---
 name: {new_name.lower().replace(' ', '-')}
 description: {new_desc}
@@ -266,7 +276,7 @@ max_tokens: {s.max_tokens}
 {f'icon: {s.icon}' if s.icon else ''}
 tools:
 {chr(10).join(f'  - {t}' for t in new_tools) if new_tools else '  - get_workspace'}
----
+{mcp_block}---
 
 {new_instructions}
 """

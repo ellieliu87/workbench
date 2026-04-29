@@ -19,6 +19,18 @@ from fastapi.middleware.cors import CORSMiddleware
 import packs as _packs
 _packs.discover_and_register()
 
+# Build the live MCP server registry from pack attachments BEFORE importing
+# routers — `routers.chat` instantiates the orchestrator at import time,
+# which constructs each specialist agent and calls
+# `resolve_mcp_servers_for_skill(...)`. If the registry is empty at that
+# point, every skill that lists `mcp_servers:` would log a spurious
+# "unknown MCP server" warning per chat call.
+try:
+    from cof.mcp_registry import register_pack_mcp_servers
+    register_pack_mcp_servers()
+except Exception as e:
+    print(f"[startup] MCP server registration failed: {e}")
+
 from routers import (
     auth,
     functions,
@@ -34,6 +46,7 @@ from routers import (
     playbooks,
     analytics_defs,
     overview_layouts,
+    mcp_servers,
 )
 
 app = FastAPI(
@@ -69,6 +82,7 @@ app.include_router(plots.router, prefix="/api/plots", tags=["Plot Builder"])
 app.include_router(tools.router, prefix="/api/tools", tags=["Python Tools"])
 app.include_router(analytics_defs.router, prefix="/api/analytics_defs", tags=["Analytics Definitions"])
 app.include_router(overview_layouts.router, prefix="/api/overview_layouts", tags=["Overview Layouts"])
+app.include_router(mcp_servers.router, prefix="/api/mcp_servers", tags=["MCP Servers"])
 
 
 @app.on_event("startup")
@@ -89,6 +103,9 @@ async def _ingest_pack_assets():
         plots._ingest_pack_plots()
     except Exception as e:
         print(f"[startup] plot pack ingest failed: {e}")
+    # MCP server registration already runs at module import (see top of
+    # this file) so the orchestrator sees the live registry when it
+    # constructs specialists. No-op here.
 
 
 @app.get("/health")

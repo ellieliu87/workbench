@@ -45,6 +45,11 @@ class AgentSkill:
     model: str
     system_prompt: str
     tools: list[str] = field(default_factory=list)
+    # MCP server short-ids (e.g. "github", "onelake"). Each id resolves
+    # against the runtime MCP registry built from pack registrations; the
+    # SDK then advertises that server's tool catalog to the model alongside
+    # any in-process Python tools the skill also lists in `tools:`.
+    mcp_servers: list[str] = field(default_factory=list)
     sub_agents: list[str] = field(default_factory=list)
     max_tokens: int = 2048
     quick_queries: list[str] = field(default_factory=list)
@@ -138,6 +143,7 @@ def _load_one(path: Path, source: str, pack_id: str | None = None) -> AgentSkill
         model=resolve_model(meta.get("model")),
         system_prompt=body,
         tools=meta.get("tools", []) if isinstance(meta.get("tools", []), list) else [],
+        mcp_servers=meta.get("mcp_servers", []) if isinstance(meta.get("mcp_servers", []), list) else [],
         sub_agents=meta.get("sub_agents", []) if isinstance(meta.get("sub_agents", []), list) else [],
         max_tokens=int(meta.get("max_tokens", 2048)),
         quick_queries=meta.get("quick_queries", []) if isinstance(meta.get("quick_queries", []), list) else [],
