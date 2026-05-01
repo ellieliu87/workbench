@@ -52,8 +52,11 @@ export default function Sidebar() {
   // The function whose tabs we should display. When the user navigates
   // away from /workspace (e.g. Settings) we keep the previous workspace
   // visible so the analyst can pop back with one click instead of
-  // re-picking from Home.
-  const fnId = currentFnId || lastFnId
+  // re-picking from Home — except when they're actually on Home, where
+  // the function-picker is the surface, so workspace-specific tabs would
+  // be redundant noise.
+  const onHome = location.pathname === '/home'
+  const fnId = onHome ? null : (currentFnId || lastFnId)
 
   // Track the last workspace seen so it sticks across tab changes.
   useEffect(() => {

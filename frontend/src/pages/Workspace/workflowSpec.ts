@@ -14,7 +14,7 @@ import yaml from 'js-yaml'
 import type { Dataset, AnalyticsRun, Scenario, TrainedModel, DestinationKind } from '@/types'
 
 export interface NodeData extends Record<string, unknown> {
-  kind: 'dataset' | 'scenario' | 'model' | 'destination'
+  kind: 'dataset' | 'scenario' | 'model' | 'destination' | 'transform'
   ref_id: string
   title: string
   subtitle: string

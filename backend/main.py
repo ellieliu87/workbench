@@ -42,11 +42,13 @@ from routers import (
     plots,
     tools,
     models_registry,
+    transforms,
     scenarios,
     playbooks,
     analytics_defs,
     overview_layouts,
     mcp_servers,
+    data_services,
 )
 
 app = FastAPI(
@@ -75,6 +77,7 @@ app.include_router(chat.router, prefix="/api/chat", tags=["Chat"])
 app.include_router(datasources.router, prefix="/api/datasources", tags=["Data Sources"])
 app.include_router(datasets.router, prefix="/api/datasets", tags=["Datasets"])
 app.include_router(models_registry.router, prefix="/api/models", tags=["Models"])
+app.include_router(transforms.router, prefix="/api/transforms", tags=["Transforms"])
 app.include_router(scenarios.router, prefix="/api/analytics", tags=["Scenarios & Runs"])
 app.include_router(playbooks.router, prefix="/api/playbooks", tags=["Playbooks"])
 app.include_router(skills.router, prefix="/api/skills", tags=["Agent Skills"])
@@ -83,6 +86,7 @@ app.include_router(tools.router, prefix="/api/tools", tags=["Python Tools"])
 app.include_router(analytics_defs.router, prefix="/api/analytics_defs", tags=["Analytics Definitions"])
 app.include_router(overview_layouts.router, prefix="/api/overview_layouts", tags=["Overview Layouts"])
 app.include_router(mcp_servers.router, prefix="/api/mcp_servers", tags=["MCP Servers"])
+app.include_router(data_services.router, prefix="/api/data_services", tags=["Data Services"])
 
 
 @app.on_event("startup")
@@ -98,11 +102,27 @@ async def _ingest_pack_assets():
         models_registry._ingest_pack_models()
     except Exception as e:
         print(f"[startup] model pack ingest failed: {e}")
+    # Transforms depend on dataset ingest (they reference output_dataset_id).
+    try:
+        transforms._ingest_pack_transforms()
+    except Exception as e:
+        print(f"[startup] transform pack ingest failed: {e}")
     # Plots depend on dataset ingest — they reference dataset_ids by name.
     try:
         plots._ingest_pack_plots()
     except Exception as e:
         print(f"[startup] plot pack ingest failed: {e}")
+    # Push CCAR + Outlook cards from the Data Services aggregator into
+    # the legacy `_SCENARIOS` + `BUILTIN_DATA` so the Workflow tab's
+    # Scenarios palette mirrors what's on the Data tab → Data Services
+    # section. Deferred to here so the data_services config has been
+    # read and any pack-attached datasets the loaders peek at exist.
+    try:
+        from services.data_services import materialize_into_scenarios_registry
+        n = materialize_into_scenarios_registry("capital_planning")
+        print(f"[startup] data_services: materialized {n} scenario(s) into _SCENARIOS")
+    except Exception as e:
+        print(f"[startup] data_services scenario materialization failed: {e}")
     # MCP server registration already runs at module import (see top of
     # this file) so the orchestrator sees the live registry when it
     # constructs specialists. No-op here.

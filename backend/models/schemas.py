@@ -535,6 +535,64 @@ class TrainedModel(BaseModel):
     created_at: str
     last_run: str | None = None
     pack_id: str | None = None  # set when seeded by a domain pack
+    # ── Workflow-execution config (for uploaded artifacts) ────────────────
+    # `feature_mapping` resolves the model's expected input names against
+    # the dataset columns at run time: {model_input_name: csv_column_name}.
+    # Empty mapping → fall back to identity match by name (case-insensitive).
+    feature_mapping: dict[str, str] = Field(default_factory=dict)
+    # Optional Python expression executed inside the sandbox before feature
+    # extraction. The expression receives a pandas DataFrame as `df` and is
+    # expected to either mutate `df` in place or assign the result back to
+    # `df`. Used for engineered features (lags, first differences, etc.).
+    pre_transform: str | None = None
+    # Output kind tells the post-processor what shape the model returns:
+    #   - "scalar"               — `model.predict(X)` → 1-D vector, one row per row.
+    #   - "probability_vector"   — `model.predict_proba(X)` → (rows, classes).
+    #   - "n_step_forecast"      — single-row input, model returns `forecast_steps` values.
+    #   - "multi_target"         — `model.predict(X)` → (rows, targets).
+    output_kind: Literal["scalar", "probability_vector", "n_step_forecast", "multi_target"] = "scalar"
+    class_labels: list[str] = Field(default_factory=list)   # for probability_vector
+    target_names: list[str] = Field(default_factory=list)   # for multi_target
+    forecast_steps: int | None = None                       # for n_step_forecast
+
+
+# ── Transforms (ETL between Data Source and Model) ─────────────────────────
+class TransformParameter(BaseModel):
+    """A single user-tunable knob exposed by a Transform recipe."""
+    name: str                                # machine name, e.g. "scenario_severity"
+    label: str                               # display label, e.g. "Scenario Severity"
+    type: Literal["string", "number", "select", "boolean"]
+    default: Any | None = None
+    options: list[str] = Field(default_factory=list)  # for type="select"
+    description: str | None = None
+
+
+class Transform(BaseModel):
+    """A registered ETL step a workflow node can reference.
+
+    A Transform pulls rows from one or more Data Sources, applies a
+    recipe, and materializes the result as a Dataset that downstream
+    models consume. For the canvas demo the recipe is read-only; the
+    transform's `output_dataset_id` points at a pre-staged dataset and
+    "execution" reduces to passing that dataset through to consumers."""
+    id: str
+    function_id: str
+    name: str
+    description: str | None = None
+    # Upstream — which configured Data Sources this transform reads from.
+    # IDs reference entries in `_DATA_SOURCES` (datasources router).
+    input_data_source_ids: list[str] = Field(default_factory=list)
+    # Downstream — the Dataset id this transform materializes to.
+    output_dataset_id: str | None = None
+    # Recipe: the Python source the transform runs (read-only in v1; the
+    # UI shows it for transparency, the orchestrator doesn't execute it
+    # because the result is pre-staged).
+    recipe_python: str | None = None
+    # Tunable parameters surfaced to the analyst.
+    parameters: list[TransformParameter] = Field(default_factory=list)
+    source: Literal["builtin", "user", "pack"] = "user"
+    pack_id: str | None = None
+    created_at: str
 
 
 class RegressionRequest(BaseModel):
@@ -553,6 +611,31 @@ class FromUriRequest(BaseModel):
     description: str | None = None
     artifactory_uri: str
     model_type: Literal["uploaded", "external"] = "external"
+
+
+class FromArtifactoryRequest(BaseModel):
+    """Install a model packaged as a pip-installable Python package.
+
+    Backend runs `pip install --no-binary <pkg> <pkg>` (forces the
+    `.tar.gz` sdist that the corporate Artifactory publishes), imports
+    the package, picks a class with a `.predict()` method, instantiates
+    it, pickles the instance, and registers a TrainedModel pointing at
+    that artifact so the canvas + sandbox flow is identical to file
+    uploads.
+
+    **Output shape** (`output_kind`, `target_names`, `class_labels`) is
+    auto-detected from the installed class — the library author declares
+    these as class attributes; the analyst doesn't fill them in here.
+    Per-run knobs like `forecast_steps` are set when the analyst wires
+    the model into a workflow, not at install time.
+    """
+    function_id: str
+    name: str
+    package_name: str
+    description: str | None = None
+    # Optional class hint — if the package exports multiple classes with
+    # `.predict()`, the analyst can pin which one to instantiate.
+    class_name: str | None = None
 
 
 # ── Scenarios & Analytics Runs ──────────────────────────────────────────────
@@ -611,8 +694,8 @@ class RunRequest(BaseModel):
 # ── Workflow runs (multi-node DAG) ─────────────────────────────────────────
 class WorkflowNode(BaseModel):
     id: str  # client-side node id
-    kind: Literal["dataset", "scenario", "model", "destination"]
-    ref_id: str  # dataset/scenario/model id, OR destination kind for destination nodes
+    kind: Literal["dataset", "scenario", "model", "destination", "transform"]
+    ref_id: str  # dataset/scenario/model/transform id, OR destination kind for destination nodes
     config: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -627,6 +710,13 @@ class WorkflowRequest(BaseModel):
     nodes: list[WorkflowNode]
     edges: list[WorkflowEdge]
     horizon_months: int = 12
+    # Optional run-context — set from the Workflow tab's run controls.
+    # `scenario_name` pins which CCAR / Outlook scenario the workflow is
+    # being executed under (for run-history attribution); `start_date`
+    # is the as-of starting month for the horizon. Both pass through to
+    # the AnalyticsRun for visibility; runtime semantics are deferred.
+    scenario_name: str | None = None
+    start_date: str | None = None  # ISO date, e.g. "2026-04-01"
     notes: str | None = None
 
 
@@ -651,6 +741,10 @@ class WorkflowResult(BaseModel):
     destinations: list[DestinationWrite] = Field(default_factory=list)
     node_status: dict[str, Literal["idle", "running", "completed", "failed", "skipped"]] = Field(default_factory=dict)
     error: str | None = None
+    # Structured error payload for the UI's "Run failed" card. Set when a
+    # node fails — keys: code, node_id, node_label, step_index, what_happened,
+    # how_to_fix, raw (the original detail dict, for the agent troubleshooter).
+    error_detail: dict[str, Any] | None = None
     duration_ms: float = 0.0
 
 
@@ -658,11 +752,52 @@ class WorkflowValidationIssue(BaseModel):
     severity: Literal["error", "warning", "info"]
     message: str
     node_id: str | None = None
+    # Machine-friendly tag the UI uses to render specific CTAs (e.g.
+    # "FEATURE_MISMATCH" → button to open the dataset).
+    code: str | None = None
+    # One-line, user-actionable suggestion shown below the message.
+    hint: str | None = None
 
 
 class WorkflowValidationResult(BaseModel):
     ok: bool
     issues: list[WorkflowValidationIssue] = Field(default_factory=list)
+
+
+# ── Data Services (Data tab) ───────────────────────────────────────────────
+class DataServiceCard(BaseModel):
+    """One card on the Data Services section. Field shape mirrors the
+    frontend's `ServiceCardSpec` so the JSON serializes straight in."""
+    id: str
+    title: str
+    subtitle: str
+    description: str
+    color: str          # hex, e.g. "#EA580C"
+    icon: str           # lucide-react icon name (frontend resolves)
+    tag: str
+    agent_prompt: str = Field(alias="agent_prompt")
+
+    model_config = {"populate_by_name": True}
+
+
+class DataServicesIntegrationStatus(BaseModel):
+    """Shown next to each section so the analyst can see whether the
+    cards are backed by a live integration or by static fallbacks."""
+    name: Literal["pa_common_tools", "onelake"]
+    enabled: bool
+    live: bool
+    detail: str = ""
+
+
+class DataServicesPayload(BaseModel):
+    function_id: str
+    predictive: list[DataServiceCard]
+    predictive_status: DataServicesIntegrationStatus
+    ccar_years: list[str]
+    ccar_scenarios: dict[str, list[DataServiceCard]]
+    ccar_status: DataServicesIntegrationStatus
+    outlook: list[DataServiceCard]
+    outlook_status: DataServicesIntegrationStatus
 
 
 # ── Playbooks (analyst-defined agentic workflows) ──────────────────────────

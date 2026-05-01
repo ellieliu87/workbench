@@ -94,11 +94,53 @@ export interface WorkflowValidationIssue {
   severity: 'error' | 'warning' | 'info'
   message: string
   node_id?: string | null
+  code?: string | null
+  hint?: string | null
 }
 
 export interface WorkflowValidationResult {
   ok: boolean
   issues: WorkflowValidationIssue[]
+}
+
+export interface WorkflowRunErrorDetail {
+  code: string
+  what_happened: string
+  how_to_fix: string
+  node_id?: string
+  node_label?: string
+  step_index?: number
+  raw?: Record<string, any>
+}
+
+// ── Data Services (Data tab) ────────────────────────────────────────────
+export interface DataServiceCard {
+  id: string
+  title: string
+  subtitle: string
+  description: string
+  color: string
+  icon: string         // lucide-react icon name
+  tag: string
+  agent_prompt: string
+}
+
+export interface DataServicesIntegrationStatus {
+  name: 'pa_common_tools' | 'onelake'
+  enabled: boolean
+  live: boolean
+  detail: string
+}
+
+export interface DataServicesPayload {
+  function_id: string
+  predictive: DataServiceCard[]
+  predictive_status: DataServicesIntegrationStatus
+  ccar_years: string[]
+  ccar_scenarios: Record<string, DataServiceCard[]>
+  ccar_status: DataServicesIntegrationStatus
+  outlook: DataServiceCard[]
+  outlook_status: DataServicesIntegrationStatus
 }
 
 export interface DataSource {
@@ -187,6 +229,13 @@ export interface TrainedModel {
   size_bytes?: number | null
   created_at: string
   last_run?: string | null
+  // Workflow-execution config for uploaded artifacts
+  feature_mapping?: Record<string, string>
+  pre_transform?: string | null
+  output_kind?: 'scalar' | 'probability_vector' | 'n_step_forecast' | 'multi_target'
+  class_labels?: string[]
+  target_names?: string[]
+  forecast_steps?: number | null
 }
 
 export interface ModelMetricsResponse {
@@ -229,9 +278,32 @@ export interface AnalyticsRun {
   duration_ms: number
 }
 
+export interface TransformParameter {
+  name: string
+  label: string
+  type: 'string' | 'number' | 'select' | 'boolean'
+  default?: any
+  options?: string[]
+  description?: string | null
+}
+
+export interface Transform {
+  id: string
+  function_id: string
+  name: string
+  description?: string | null
+  input_data_source_ids: string[]
+  output_dataset_id?: string | null
+  recipe_python?: string | null
+  parameters: TransformParameter[]
+  source: 'builtin' | 'user' | 'pack'
+  pack_id?: string | null
+  created_at: string
+}
+
 export interface WorkflowNode {
   id: string
-  kind: 'dataset' | 'scenario' | 'model' | 'destination'
+  kind: 'dataset' | 'scenario' | 'model' | 'destination' | 'transform'
   ref_id: string
   config?: Record<string, any>
 }
@@ -265,6 +337,7 @@ export interface WorkflowResult {
   destinations: DestinationWrite[]
   node_status: Record<string, NodeRunStatus>
   error?: string | null
+  error_detail?: WorkflowRunErrorDetail | null
   duration_ms: number
 }
 

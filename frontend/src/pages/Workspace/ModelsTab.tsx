@@ -75,7 +75,7 @@ export default function ModelsTab({ functionId, functionName, onAskAgent, onCont
           <div className="text-xs" style={{ color: 'var(--text-muted)' }}>
             {loading
               ? 'Loading…'
-              : `${models.length} model${models.length === 1 ? '' : 's'}. Build OLS / logistic in-app, upload an artifact, or reference a URI in the company artifactory.`}
+              : `${models.length} model${models.length === 1 ? '' : 's'}. Build OLS / logistic in-app, upload an artifact, or pip-install a package from the corporate Artifactory.`}
           </div>
         </div>
         <div className="flex gap-2">
@@ -84,7 +84,7 @@ export default function ModelsTab({ functionId, functionName, onAskAgent, onCont
             className="px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-1.5"
             style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', color: 'var(--text-secondary)' }}
           >
-            <Link2 size={13} /> From URI
+            <Link2 size={13} /> From Artifactory
           </button>
           <button
             onClick={() => setUploadOpen(true)}
@@ -451,6 +451,17 @@ function UploadModelModal({
   const [errors, setErrors] = useState<{ file: string; message: string }[]>([])
   const inputRef = useRef<HTMLInputElement>(null)
 
+  // ── Workflow-execution config (applied to ALL files in this upload).
+  // Output kind is the only required choice — feature mapping is auto
+  // resolved from `model.feature_names` (or `feature_names_in_` for
+  // sklearn models fitted with named DataFrame columns), and the user's
+  // dataset is expected to contain those columns directly.
+  type OutputKind = 'scalar' | 'probability_vector' | 'n_step_forecast' | 'multi_target'
+  const [outputKind, setOutputKind] = useState<OutputKind>('scalar')
+  const [classLabels, setClassLabels] = useState('')          // comma-separated
+  const [targetNames, setTargetNames] = useState('')          // comma-separated
+  const [forecastSteps, setForecastSteps] = useState<number>(12)
+
   const addFiles = (incoming: FileList | null) => {
     if (!incoming || incoming.length === 0) return
     const next = Array.from(incoming)
@@ -496,6 +507,21 @@ function UploadModelModal({
       const finalName = (names[i] && names[i].trim()) || stem
       fd.append('name', finalName)
       if (description) fd.append('description', description)
+
+      // Workflow-execution config — output kind only. Feature names are
+      // discovered from the model itself (`model.feature_names` or
+      // sklearn's `feature_names_in_`); the dataset is expected to use
+      // matching column names.
+      fd.append('output_kind', outputKind)
+      if (outputKind === 'probability_vector' && classLabels.trim()) {
+        fd.append('class_labels_csv', classLabels.trim())
+      }
+      if (outputKind === 'multi_target' && targetNames.trim()) {
+        fd.append('target_names_csv', targetNames.trim())
+      }
+      if (outputKind === 'n_step_forecast') {
+        fd.append('forecast_steps', String(Math.max(1, Math.min(120, forecastSteps || 1))))
+      }
       try {
         await api.post('/api/models/upload', fd, { headers: { 'Content-Type': 'multipart/form-data' } })
       } catch (e: any) {
@@ -616,6 +642,75 @@ function UploadModelModal({
         />
       </Field>
 
+      {/* ── Workflow-execution config ──────────────────────────────── */}
+      <Field label="Output kind">
+        <div className="grid grid-cols-2 gap-1.5 p-1 rounded-lg" style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border)' }}>
+          {([
+            { k: 'scalar',              l: 'Scalar',              h: '1 prediction per input row' },
+            { k: 'probability_vector',  l: 'Probability vector',  h: 'predict_proba per row' },
+            { k: 'n_step_forecast',     l: 'N-step forecast',     h: '1 input → N output rows' },
+            { k: 'multi_target',        l: 'Multi-target',        h: 'predict per row across N targets' },
+          ] as const).map(({ k, l, h }) => {
+            const active = outputKind === k
+            return (
+              <button
+                key={k}
+                onClick={() => setOutputKind(k as OutputKind)}
+                disabled={saving}
+                className="text-left rounded-md px-3 py-2 transition-colors"
+                style={{
+                  background: active ? 'var(--bg-card)' : 'transparent',
+                  border: `1px solid ${active ? 'var(--accent)' : 'transparent'}`,
+                  boxShadow: active ? '0 1px 4px rgba(0,0,0,0.05)' : 'none',
+                }}
+                title={h}
+              >
+                <div className="text-sm font-semibold" style={{ color: active ? 'var(--accent)' : 'var(--text-primary)' }}>{l}</div>
+                <div className="text-[11px] mt-0.5" style={{ color: 'var(--text-muted)' }}>{h}</div>
+              </button>
+            )
+          })}
+        </div>
+      </Field>
+
+      {outputKind === 'probability_vector' && (
+        <Field label="Class labels (comma-separated, in model order)" hint="Becomes the p_<label> columns in the output.">
+          <input
+            className="input"
+            value={classLabels}
+            onChange={(e) => setClassLabels(e.target.value)}
+            placeholder="e.g. low, medium, high"
+            disabled={saving}
+          />
+        </Field>
+      )}
+
+      {outputKind === 'multi_target' && (
+        <Field label="Target names (comma-separated, in model order)">
+          <input
+            className="input"
+            value={targetNames}
+            onChange={(e) => setTargetNames(e.target.value)}
+            placeholder="e.g. PD, LGD, EAD"
+            disabled={saving}
+          />
+        </Field>
+      )}
+
+      {outputKind === 'n_step_forecast' && (
+        <Field label="Forecast steps">
+          <input
+            type="number"
+            min={1}
+            max={120}
+            className="input"
+            value={forecastSteps}
+            onChange={(e) => setForecastSteps(parseInt(e.target.value) || 1)}
+            disabled={saving}
+          />
+        </Field>
+      )}
+
       {progress && (
         <div
           className="rounded-md px-3 py-2 text-xs flex items-center gap-2"
@@ -670,7 +765,9 @@ function UploadModelModal({
   )
 }
 
-// ── From URI modal ──────────────────────────────────────────────────────────
+// ── Install From Artifactory modal ──────────────────────────────────────────
+// Triggers `pip install <package_name>` on the backend, then registers
+// the installed package as a model the canvas can run.
 function FromUriModal({
   functionId, onClose, onCreated,
 }: {
@@ -680,54 +777,137 @@ function FromUriModal({
 }) {
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
-  const [uri, setUri] = useState('artifactory://')
+  const [packageName, setPackageName] = useState('')
+  const [classNameHint, setClassNameHint] = useState('')
+
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [installLog, setInstallLog] = useState<string | null>(null)
 
   const submit = async () => {
     setSaving(true)
     setError(null)
+    setInstallLog(null)
     try {
-      await api.post('/api/models/from-uri', {
-        function_id: functionId, name, description,
-        artifactory_uri: uri, model_type: 'external',
+      await api.post('/api/models/from-artifactory', {
+        function_id: functionId,
+        name,
+        description: description || undefined,
+        package_name: packageName.trim(),
+        class_name: classNameHint.trim() || undefined,
       })
       onCreated()
     } catch (e: any) {
-      setError(e?.response?.data?.detail || 'Save failed')
+      const detail = e?.response?.data?.detail
+      if (detail && typeof detail === 'object') {
+        setError(detail.message || 'Install failed.')
+        if (detail.log) setInstallLog(detail.log)
+      } else {
+        setError(typeof detail === 'string' ? detail : 'Install failed')
+      }
     } finally {
       setSaving(false)
     }
   }
 
   return (
-    <Modal title="Reference an Artifactory Model" onClose={onClose}>
+    <Modal title="Install Model From Artifactory" onClose={onClose}>
+      <div
+        className="text-[11px] px-3 py-2 rounded-md mb-1"
+        style={{ background: 'var(--bg-elevated)', color: 'var(--text-secondary)', lineHeight: 1.55 }}
+      >
+        Backend runs{' '}
+        <span className="font-mono">pip install --no-binary &lt;package&gt; &lt;package&gt;</span>
+        {' '}to pull the <span className="font-mono">.tar.gz</span> sdist from your
+        corporate Artifactory, then auto-detects the prediction entry —
+        a class with <span className="font-mono">.predict</span>/<span className="font-mono">.forecast</span>/<span className="font-mono">.run</span>/etc.,
+        or a top-level function with one of those names. Output shape and
+        feature names are read from the package's own metadata.
+      </div>
+
       <Field label="Model name">
-        <input className="input" value={name} onChange={(e) => setName(e.target.value)} />
-      </Field>
-      <Field label="Artifactory URI">
         <input
-          className="input font-mono"
-          value={uri}
-          onChange={(e) => setUri(e.target.value)}
-          placeholder="artifactory://prod/credit/pd/v4.pkl"
+          className="input"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="RDMaaS"
         />
       </Field>
+
+      <Field label="Artifactory Package Name">
+        <input
+          className="input font-mono"
+          value={packageName}
+          onChange={(e) => setPackageName(e.target.value)}
+          placeholder="c1-rdmaas"
+          disabled={saving}
+        />
+      </Field>
+
       <Field label="Description (optional)">
         <input className="input" value={description} onChange={(e) => setDescription(e.target.value)} />
       </Field>
 
+      <div
+        className="text-[11px] px-3 py-1.5 rounded-md"
+        style={{ background: 'var(--bg-elevated)', color: 'var(--text-muted)', lineHeight: 1.55 }}
+      >
+        Output shape (scalar / multi-target / etc.) is detected from the
+        installed package's class metadata. Per-run knobs like forecast
+        horizon are set when you wire the model into a workflow.
+      </div>
+
+      <details className="text-xs">
+        <summary
+          className="cursor-pointer font-semibold"
+          style={{ color: 'var(--text-muted)' }}
+        >
+          Advanced — pin a specific entry
+        </summary>
+        <div className="mt-2">
+          <Field
+            label="Entry name (optional)"
+            hint="If auto-detection picks the wrong entry, pin the class or function name here. Leave blank to auto-detect."
+          >
+            <input
+              className="input font-mono"
+              value={classNameHint}
+              onChange={(e) => setClassNameHint(e.target.value)}
+              disabled={saving}
+              placeholder="RDMaaS  or  forecast"
+            />
+          </Field>
+        </div>
+      </details>
+
       {error && (
-        <div className="text-xs px-3 py-2 rounded-md" style={{ background: 'var(--error-bg)', color: 'var(--error)' }}>
-          {error}
+        <div
+          className="text-xs px-3 py-2 rounded-md"
+          style={{ background: 'var(--error-bg)', color: 'var(--error)', lineHeight: 1.55 }}
+        >
+          <div className="font-semibold mb-1">{error}</div>
+          {installLog && (
+            <pre
+              className="font-mono text-[10px] overflow-auto rounded mt-1 px-2 py-1.5"
+              style={{
+                background: 'var(--bg-card)',
+                border: '1px solid var(--border-subtle)',
+                color: 'var(--text-secondary)',
+                maxHeight: 160,
+                whiteSpace: 'pre-wrap',
+              }}
+            >
+              {installLog}
+            </pre>
+          )}
         </div>
       )}
 
       <ModalFooter
         onClose={onClose}
         onSubmit={submit}
-        disabled={!name || !uri || saving}
-        submitLabel={saving ? 'Saving…' : 'Register Reference'}
+        disabled={!name || !packageName.trim() || saving}
+        submitLabel={saving ? `Running pip install ${packageName.trim() || '…'}` : 'Install & Register'}
       />
     </Modal>
   )
@@ -947,7 +1127,12 @@ function ModelDetailPanel({
                   )}
                   {model.dataset_id && <Row k="Dataset" v={model.dataset_id} />}
                   {model.artifact_path && <Row k="Artifact path" v={model.artifact_path} />}
-                  {model.artifactory_uri && <Row k="Artifactory URI" v={model.artifactory_uri} />}
+                  {model.artifactory_uri && (
+                    <Row
+                      k={model.artifactory_uri.startsWith('pip://') ? 'Artifactory Package' : 'Artifactory URI'}
+                      v={model.artifactory_uri.replace(/^pip:\/\//, '')}
+                    />
+                  )}
                   <Row k="Created" v={new Date(model.created_at).toLocaleString()} />
                 </tbody>
               </table>
@@ -1054,7 +1239,9 @@ function ModalFooter({
   )
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function Field({
+  label, hint, children,
+}: { label: string; hint?: string; children: React.ReactNode }) {
   return (
     <label className="block">
       <span
@@ -1064,6 +1251,11 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
         {label}
       </span>
       {children}
+      {hint && (
+        <div className="text-[11px] mt-1" style={{ color: 'var(--text-muted)' }}>
+          {hint}
+        </div>
+      )}
     </label>
   )
 }

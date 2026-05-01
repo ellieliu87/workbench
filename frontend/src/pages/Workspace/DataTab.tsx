@@ -2,16 +2,16 @@ import { useEffect, useRef, useState } from 'react'
 import {
   Database, FileText, Trash2, Upload, Plus, X, Search,
   Snowflake, Cloud, HardDrive, Globe, Eye, Sparkles, Loader2,
-  FlaskConical, ShieldCheck,
+  Layers, ShieldCheck,
 } from 'lucide-react'
 import api from '@/lib/api'
 import { useChatStore } from '@/store/chatStore'
 import type {
   Dataset, DatasetPreview, DataSource, DataSourceTable,
 } from '@/types'
-import ScenariosSection from './ScenariosSection'
+import DataServicesSection from './DataServicesSection'
 
-type SectionId = 'datasets' | 'scenarios'
+type SectionId = 'datasets' | 'data_services'
 
 interface Props {
   functionId: string
@@ -22,22 +22,20 @@ interface Props {
 
 export default function DataTab({ functionId, functionName, onAskAgent, onContextChange }: Props) {
   const [section, setSection] = useState<SectionId>('datasets')
-  const [counts, setCounts] = useState<{ datasets: number; scenarios: number }>({ datasets: 0, scenarios: 0 })
+  const [datasetCount, setDatasetCount] = useState<number>(0)
 
-  // Lightweight count fetch so the toggle pills stay accurate
+  // Lightweight count fetch so the toggle pill stays accurate
   useEffect(() => {
-    Promise.all([
-      api.get(`/api/datasets`, { params: { function_id: functionId } }),
-      api.get(`/api/analytics/scenarios`, { params: { function_id: functionId } }),
-    ])
-      .then(([d, s]) => setCounts({ datasets: d.data.length, scenarios: s.data.length }))
+    api
+      .get(`/api/datasets`, { params: { function_id: functionId } })
+      .then((d) => setDatasetCount(d.data.length))
       .catch(() => {})
   }, [functionId, section])
 
   useEffect(() => {
-    onContextChange(`${functionName} (Data tab · ${section}): ${counts.datasets} datasets, ${counts.scenarios} scenarios`)
+    onContextChange(`${functionName} (Data tab · ${section}): ${datasetCount} datasets`)
     return () => onContextChange(null)
-  }, [section, counts, functionName, onContextChange])
+  }, [section, datasetCount, functionName, onContextChange])
 
   return (
     <div>
@@ -47,8 +45,8 @@ export default function DataTab({ functionId, functionName, onAskAgent, onContex
         style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border)' }}
       >
         {([
-          { id: 'datasets',  label: 'Datasets',  icon: Database,      count: counts.datasets },
-          { id: 'scenarios', label: 'Scenarios', icon: FlaskConical,  count: counts.scenarios },
+          { id: 'datasets',      label: 'Datasets',      icon: Database, count: datasetCount },
+          { id: 'data_services', label: 'Data Services', icon: Layers,   count: null },
         ] as const).map(({ id, label, icon: Icon, count }) => {
           const active = section === id
           return (
@@ -64,17 +62,19 @@ export default function DataTab({ functionId, functionName, onAskAgent, onContex
             >
               <Icon size={13} />
               {label}
-              <span
-                className="rounded-full px-1.5 py-0.5"
-                style={{
-                  fontSize: 10, fontWeight: 700,
-                  background: active ? 'var(--accent-light)' : 'var(--bg-elevated)',
-                  color: active ? 'var(--accent)' : 'var(--text-muted)',
-                  marginLeft: 2,
-                }}
-              >
-                {count}
-              </span>
+              {count != null && (
+                <span
+                  className="rounded-full px-1.5 py-0.5"
+                  style={{
+                    fontSize: 10, fontWeight: 700,
+                    background: active ? 'var(--accent-light)' : 'var(--bg-elevated)',
+                    color: active ? 'var(--accent)' : 'var(--text-muted)',
+                    marginLeft: 2,
+                  }}
+                >
+                  {count}
+                </span>
+              )}
             </button>
           )
         })}
@@ -87,8 +87,8 @@ export default function DataTab({ functionId, functionName, onAskAgent, onContex
           onAskAgent={onAskAgent}
         />
       )}
-      {section === 'scenarios' && (
-        <ScenariosSection
+      {section === 'data_services' && (
+        <DataServicesSection
           functionId={functionId}
           functionName={functionName}
           onAskAgent={onAskAgent}

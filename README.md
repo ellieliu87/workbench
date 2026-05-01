@@ -2,7 +2,7 @@
 
 Self-serve analytics workbench for the **Capital Markets & Analytics**
 department. The shape: an analyst lands on a function-selection home page,
-opens a workspace for one of 8 business functions, and gets a 7-tab work
+opens a workspace for one of 6 business functions, and gets a 7-tab work
 surface backed by a multi-agent system. Domain-specific data, models,
 agents, and tools ship as **domain packs** so adding a new business area is
 a directory drop, not a code-base rewrite.
@@ -34,10 +34,13 @@ cma/
 │   │
 │   ├── packs/                     ← DOMAIN PACKS — opt-in bundles
 │   │   ├── __init__.py            ← Pack, PackContext, registry, group filter
-│   │   └── portfolio/             ← first domain pack
-│   │       ├── pack.py            ← register(ctx) — entry point
-│   │       ├── skills/            ← 8 portfolio-planning agents (.md)
-│   │       └── tools.py           ← 20 register_python_tool(...) calls
+│   │   ├── portfolio/             ← first domain pack
+│   │   │   ├── pack.py            ← register(ctx) — entry point
+│   │   │   ├── skills/            ← 8 portfolio-planning agents (.md)
+│   │   │   └── tools.py           ← 20 register_python_tool(...) calls
+│   │   └── deposits/              ← deposit-forecasting pack
+│   │       └── pack.py            ← attaches Data Harness transform,
+│   │                                3 MaaS models, demo dashboard
 │   │
 │   ├── cof/
 │   │   ├── orchestrator.py        ← AsyncOrchestrator (streaming + traces)
@@ -45,16 +48,28 @@ cma/
 │   │                                openai-agents SDK; emits per-step trace
 │   │
 │   ├── models/schemas.py          ← Pydantic v2 wire schemas
+│   ├── services/
+│   │   ├── model_runner.py        ← sandboxed pkl/joblib/onnx prediction
+│   │   ├── data_services.py       ← Data Services aggregation
+│   │   │                            (pa_common_tools + OneLake integrations)
+│   │   └── workspace_data.py      ← static Overview-tab fallback specs
+│   │
+│   ├── config/
+│   │   └── data_services.example.env  ← env-var docs for proxy-env wiring
 │   │
 │   └── routers/
 │       ├── auth.py                ← pqr557 / capital1, group-based access
-│       ├── functions.py           ← 8 business functions catalog
+│       ├── functions.py           ← 6 business functions catalog
 │       ├── workspace.py           ← Overview tab default views
 │       ├── chat.py                ← /api/chat/message (entity-aware routing)
+│       ├── chat_validation.py     ← workflow validator (cycle / refs / features)
 │       ├── datasources.py         ← Snowflake / OneLake / S3 / file uploads
 │       ├── datasets.py            ← per-function dataset registry
 │       ├── models_registry.py     ← per-function model registry
-│       ├── scenarios.py           ← scenarios + analytics runs
+│       │                            (build / upload / from-artifactory)
+│       ├── transforms.py          ← per-function ETL transform registry
+│       ├── scenarios.py           ← scenarios + analytics + workflow runs
+│       ├── data_services.py       ← /api/data_services aggregation endpoint
 │       ├── playbooks.py           ← phased agent playbooks (gated runs)
 │       ├── analytics_defs.py      ← self-serve analytic definitions
 │       ├── plots.py               ← tile / chart builder
@@ -72,8 +87,12 @@ cma/
 │   ├── store/                     ← Zustand: auth, chat
 │   └── types/index.ts             ← API wire types
 │
-├── sample_data/portfolio/         ← bundled CSVs the portfolio pack stages
-└── sample_models/portfolio/       ← bundled model .pkls the pack stages
+├── sample_data/
+│   ├── portfolio/                 ← bundled CSVs the portfolio pack stages
+│   └── deposits/                  ← Data Harness output + seeded results
+└── sample_models/
+    ├── portfolio/                 ← bundled .pkls (BGM, prepayment, etc.)
+    └── deposits/                  ← RDMaaS / CommMaaS / SBBMaaS .pkls
 ```
 
 ### Workspace tabs (per function)
@@ -81,9 +100,9 @@ cma/
 | Tab            | What it does                                                   |
 |----------------|----------------------------------------------------------------|
 | **Overview**   | KPI strip + default charts/tables/insights for the function    |
-| **Data**       | Datasets, scenarios, source bindings; per-card explain agent   |
-| **Models**     | Build OLS / logistic in-app, or upload `.pkl`/`.joblib`/`.onnx`/`.json` |
-| **Workflow**   | Three views over the same graph — *Steps*, *Canvas* (ReactFlow), *Spec* (YAML). Run end-to-end with destinations |
+| **Data**       | Two views: *Datasets* (source bindings + uploads) and *Data Services* — Predictive Analytics built-ins (Data Harness, Data Quality Check), CCAR scenarios with year picker (BHCB/BHCS/FedB/FedSA), Outlook scenarios. Each section shows a `live · pa_common_tools` / `live · onelake` / `static` badge. |
+| **Models**     | Build OLS / logistic in-app, upload `.pkl`/`.joblib`/`.onnx`, or **From Artifactory** — `pip install --no-binary <pkg> <pkg>` resolves the package's prediction entry (class with `.predict`/`.forecast`/`.run`/etc., or top-level function), pickles a callable, and registers it. Output shape is auto-detected from class/function metadata. |
+| **Workflow**   | Three views over the same graph — *Steps*, *Canvas* (ReactFlow), *Spec* (YAML). Canvas palette has Datasets, Scenarios, Models, Destinations, plus **Transforms** (ETL recipes with a side-panel showing the read-only Python). Click **Validate** for structured issue list (BLOCKER/WARNING/NOTE with hints, click to highlight node). Run-time failures render a code-tagged "What happened / How to fix" card. |
 | **Playbooks**  | Author phased agent workflows with gate-by-gate analyst review; trace streams live as the agent calls tools |
 | **Analytics**  | Self-serve analytic definitions — *Aggregate*, *Compare*, *Custom Python* primitives + an agent that drafts specs from prose |
 | **Reporting**  | Tile/chart catalog over your function's data; click a tile to have the tile-explainer agent narrate it |
@@ -126,12 +145,15 @@ A pack is a self-contained directory under `backend/packs/<id>/` with one
 entry point: `pack.py:register(ctx)`. The registration writes into four
 shared registries that the routers consume:
 
-| Registry             | Populated by                                  | Consumer                       |
-|----------------------|-----------------------------------------------|--------------------------------|
-| Skill source dirs    | `ctx.register_skill_dir(path)`                | `agent/skill_loader.py`        |
-| Python tool seeds    | `ctx.register_python_tool(...)`               | `routers/tools.py`             |
-| Dataset attachments  | `ctx.attach_dataset(function_id=..., ...)`    | `routers/datasets.py` (startup hook) |
-| Model attachments    | `ctx.attach_model(function_id=..., ...)`      | `routers/models_registry.py` (startup hook) |
+| Registry              | Populated by                                  | Consumer                                     |
+|-----------------------|-----------------------------------------------|----------------------------------------------|
+| Skill source dirs     | `ctx.register_skill_dir(path)`                | `agent/skill_loader.py`                      |
+| Python tool seeds     | `ctx.register_python_tool(...)`               | `routers/tools.py`                           |
+| Dataset attachments   | `ctx.attach_dataset(function_id=..., ...)`    | `routers/datasets.py` (startup hook)         |
+| Model attachments     | `ctx.attach_model(function_id=..., ...)`      | `routers/models_registry.py` (startup hook)  |
+| Transform attachments | `ctx.attach_transform(function_id=..., ...)`  | `routers/transforms.py` (startup hook)       |
+| Plot attachments      | `ctx.attach_plot(function_id=..., ...)`       | `routers/plots.py` (startup hook)            |
+| MCP server attachments| `ctx.register_mcp_server(...)`                | `cof/orchestrator.py`                        |
 
 Each registered artifact is stamped with `source="pack"` and `pack_id=<id>`
 on its wire schema, plus a colored `Pack: <id>` badge in the UI. Packs
@@ -213,23 +235,27 @@ account `routers/auth.py` accepts; any other combination returns 401.
 
 ## Business functions shipped out of the box
 
-Capital Markets:
+Markets & Risk:
 
 1. Investment Portfolio Analytics
-2. Interest Rate Risk Management
-3. Liquidity & Funding
-4. Market Risk & VaR
+2. Market Risk & VaR
+3. Interest Rate Risk Management
 
-Finance:
+Treasury & Capital:
 
-5. Credit Risk Analytics
-6. Treasury & Funds Transfer Pricing
-7. Capital Planning & CCAR
-8. Financial Planning & Reporting
+4. Liquidity & Funding
+5. Capital Planning & CCAR
+6. Financial Planning & Reporting
 
-The portfolio pack auto-attaches its 2 datasets (macro history + forecast)
-and the BGM term-structure model to **Investment Portfolio**, and a copy
-of the same BGM model to **Interest Rate Risk**. Other functions start
+The **portfolio** pack attaches its 2 datasets (macro history + forecast)
+and the BGM term-structure model to *Investment Portfolio*, plus a copy
+of the same BGM model to *Interest Rate Risk*.
+
+The **deposits** pack attaches a Data Harness transform (reads OneLake →
+Finance), three MaaS pickle models (`output_kind="multi_target"` returning
+end_balance + interest_income), and a starter Reporting catalog (unpinned
+by default) to *Capital Planning & CCAR* — the deposit-suite forecast is
+one workstream that feeds the overall capital plan. Other functions start
 empty until you build models, upload datasets, or attach a pack.
 
 ## Adding a new domain pack
@@ -279,6 +305,21 @@ def register(ctx: PackContext) -> None:
         source_path=Path(__file__).parent / "models" / "bgm.pkl",
         train_metrics={"calibration_rmse_bps": 4.2},
     )
+
+    # Pre-wire an ETL transform so the Workflow canvas has a Transforms
+    # palette card. The recipe is read-only Python; running the canvas
+    # node resolves to `output_dataset_id` for downstream models.
+    ctx.attach_transform(
+        function_id="interest_rate_risk",
+        transform_id="tr-irr-rate-harness",
+        name="Rate Harness",
+        description="Joins OneLake rate tables and engineers IRR features.",
+        input_data_source_ids=["ds-onelake-finance"],
+        output_dataset_id="ds-rate-history",
+        recipe_python="...",
+        parameters=[{"name": "horizon_months", "label": "Horizon",
+                     "type": "number", "default": 27}],
+    )
 ```
 
 **`tools.py`** — one `ctx.register_python_tool(...)` per tool:
@@ -312,6 +353,141 @@ flags any unknown ones inline.
 Restart the backend; `packs.discover_and_register()` runs at startup and
 the pack's artifacts appear automatically with their `Pack: <id>` badge.
 
+## Data Services integrations (proxy-env)
+
+The Data tab's **Data Services** section has three groups — *Scenario
+Service from Predictive Analytics* (Data Harness, Data Quality Check),
+*CCAR* (BHCB / BHCS / FedB / FedSA per year), and *Outlook* (internal IR
+view). Each group has two backing modes:
+
+- **static** (default) — hard-coded specs in
+  `backend/services/data_services.py`. The app works end-to-end without
+  any corporate connectivity.
+- **live** — opt-in, env-driven. Predictive Analytics tools pulled from
+  a `pa_common_tools` pip package; CCAR + Outlook pulled from OneLake
+  tables. When live mode is on but the integration fails at runtime
+  (package missing, OneLake unreachable, schema drift), the backend logs
+  and falls back to static so the UI never breaks.
+
+Each section header shows a status badge:
+
+| Badge                       | Meaning                                                |
+|-----------------------------|--------------------------------------------------------|
+| `static` (grey)             | Integration is off                                     |
+| `live · <integration>` (green) | Enabled and succeeded                               |
+| `<integration> · fallback` (amber) | Enabled but failed; hover for the failure detail |
+
+Single source of truth for env vars:
+[`backend/config/data_services.example.env`](backend/config/data_services.example.env).
+Copy it into the backend's runtime env (`.env`, systemd unit, K8s
+Secret) when running inside the corporate proxy.
+
+### Configuring `pa_common_tools` (Predictive Analytics tools)
+
+The package ships **Data Harness** + **Data Quality Check** as importable
+entries; the workbench discovers them by name convention so updating the
+cards becomes a `pip install --upgrade` — no app deploy.
+
+**1. Set env vars** (default values below — only `_ENABLED` strictly needs
+flipping if your package name matches):
+
+```bash
+CMA_PA_COMMON_TOOLS_ENABLED=1
+CMA_PA_COMMON_TOOLS_PACKAGE=pa_common_tools
+```
+
+**2. Confirm the package exposes one of these naming patterns** at the
+top level of its module:
+
+| Service             | Recognized names                                      |
+|---------------------|-------------------------------------------------------|
+| Data Harness        | `DataHarness`, `data_harness`, `DATA_HARNESS`         |
+| Data Quality Check  | `DataQualityCheck`, `data_quality_check`, `DATA_QUALITY_CHECK` |
+
+Either a class, a function, or a module-level constant pointing at one
+works. Card text comes from (in order): an explicit `.description`
+attribute → the entry's docstring → the static fallback.
+
+**3. Install the package in the backend's venv**:
+
+```bash
+cd backend
+uv add pa_common_tools          # or `uv pip install pa_common_tools`
+```
+
+**4. Restart the backend.** The Data Services section should now show a
+`live · pa_common_tools` badge above Predictive Analytics, with the card
+tag changed from `BUILT-IN` to e.g. `pa_common_tools · DataHarness`.
+
+If discovery finds nothing, the backend logs a warning naming the
+missing entries and falls back to static — so it's safe to flip on
+before the package is fully built out.
+
+### Configuring OneLake-backed CCAR + Outlook
+
+CCAR and Outlook both come from OneLake tables when this integration is
+on. The workbench fetches the years (distinct `year` column on the CCAR
+table), then per-year scenarios, then the Outlook table; any failure
+falls back to static.
+
+**1. Set env vars** (default workspace + lakehouse names below; override
+to point at your tables):
+
+```bash
+CMA_ONELAKE_SCENARIOS_ENABLED=1
+CMA_ONELAKE_WORKSPACE=Finance
+CMA_ONELAKE_LAKEHOUSE=cma
+CMA_ONELAKE_CCAR_TABLE=ccar_scenarios
+CMA_ONELAKE_OUTLOOK_TABLE=outlook_scenarios
+```
+
+**2. Plug in your corporate extractor.** Open
+`backend/services/data_services.py` and find `_onelake_read_table(...)` —
+it currently raises `NotImplementedError`. Replace its body with your
+extractor:
+
+```python
+def _onelake_read_table(table: str, **filters: Any) -> list[dict[str, Any]]:
+    from your_corp_lib import OneLakeExtractor
+    client = OneLakeExtractor(
+        workspace=ONELAKE_WORKSPACE,
+        lakehouse=ONELAKE_LAKEHOUSE,
+    )
+    return client.read_table(table_name=table, **filters)
+```
+
+The function should return a list of plain dicts. Keep it synchronous —
+if your client is async, wrap with `asyncio.run(...)` so the rest of the
+loaders stay unchanged.
+
+**3. Match the expected row shapes**:
+
+| Table                | Required columns                                               |
+|----------------------|----------------------------------------------------------------|
+| `ccar_scenarios`     | `year`, `code`, `label`, `severity`, `source`, `description`   |
+| `outlook_scenarios`  | `id`, `title`, `subtitle`, `description` (+ optional `color`, `icon`, `tag`, `agent_prompt`) |
+
+`severity` ∈ `{base, adverse, severely_adverse}` (drives card color).
+`source` ∈ `{BHC, Fed}` (drives card icon).
+
+**4. Restart the backend.** The CCAR and Outlook section headers should
+flip to `live · onelake` with the year dropdown now reflecting whatever
+distinct years are in your `ccar_scenarios` table.
+
+### Quick verification
+
+After flipping either integration on, hit the endpoint directly to see
+what the loaders found:
+
+```bash
+curl -H "Authorization: Bearer <token>" \
+  "http://127.0.0.1:8001/api/data_services?function_id=capital_planning" \
+  | jq '.predictive_status, .ccar_status, .outlook_status'
+```
+
+Each status object reports `enabled`, `live`, and a `detail` string —
+the same string the UI shows on hover of the badge.
+
 ## Customization (Settings)
 
 The Settings page (sidebar) has four tabs:
@@ -339,6 +515,11 @@ The Settings page (sidebar) has four tabs:
   all live in dicts. They reset on backend restart. The pack-bundled
   datasets and models re-stage on startup from `sample_data/` and
   `sample_models/`, so those reappear automatically.
+- **Data Services live mode is opt-in.** Outside the corporate proxy,
+  Data Services renders static fallback cards — the app stays usable.
+  See [Data Services integrations](#data-services-integrations-proxy-env)
+  for how to flip on `pa_common_tools` and OneLake when you're inside
+  the proxy.
 - **Auth is mock** — single account, in-memory bearer-token store. The
   `groups` column is honored by `is_pack_visible(...)`, but there's no
   flow for adding a second user yet.

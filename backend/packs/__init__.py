@@ -71,6 +71,7 @@ _PACKS: dict[str, Pack] = {}
 _PYTHON_TOOL_SEEDS: list[dict] = []           # consumed by routers/tools.py
 _DATASET_ATTACHMENTS: list[dict] = []         # consumed by routers/datasets.py
 _MODEL_ATTACHMENTS: list[dict] = []           # consumed by routers/models_registry.py
+_TRANSFORM_ATTACHMENTS: list[dict] = []       # consumed by routers/transforms.py
 _PLOT_ATTACHMENTS: list[dict] = []            # consumed by routers/plots.py
 _MCP_SERVER_ATTACHMENTS: list[dict] = []      # consumed by cof/orchestrator.py
 
@@ -199,6 +200,48 @@ class PackContext:
             "pack_id": self.pack.id,
         })
 
+    # ── Transform attachments ──────────────────────────────────────────────
+    def attach_transform(
+        self,
+        *,
+        function_id: str,
+        transform_id: str,
+        name: str,
+        description: str = "",
+        input_data_source_ids: list[str] | None = None,
+        output_dataset_id: str | None = None,
+        recipe_python: str | None = None,
+        parameters: list[dict] | None = None,
+    ) -> None:
+        """Stage a Transform (ETL recipe) as a workflow node a function
+        can drop on its canvas.
+
+        For the demo, `output_dataset_id` should point at a Dataset the
+        pack also attaches — running the transform on the canvas
+        materializes (passthrough) those rows. The recipe and parameters
+        are surfaced to the analyst so they can read what the step does.
+
+        Args:
+          function_id:           which function this transform appears under.
+          transform_id:          stable id (e.g. "tr-deposits-scenario-service").
+          input_data_source_ids: ids of `_DATA_SOURCES` entries this reads from
+                                 (e.g. ["ds-onelake-finance"]). Shown on the card.
+          output_dataset_id:     dataset id this transform materializes to.
+          recipe_python:         read-only Python source — what the recipe does.
+          parameters:            list of {name, label, type, default, options?}.
+        """
+        _TRANSFORM_ATTACHMENTS.append({
+            "function_id": function_id,
+            "transform_id": transform_id,
+            "name": name,
+            "description": description,
+            "input_data_source_ids": list(input_data_source_ids or []),
+            "output_dataset_id": output_dataset_id,
+            "recipe_python": recipe_python,
+            "parameters": list(parameters or []),
+            "pack_id": self.pack.id,
+        })
+
     # ── Plot / tile attachments ────────────────────────────────────────────
     def attach_plot(
         self,
@@ -231,8 +274,17 @@ class PackContext:
         description: str,
         source_path: Path | str,
         train_metrics: dict | None = None,
+        # Workflow-execution config — same fields the upload modal exposes,
+        # but baked into the pack so pack-shipped models work in workflows
+        # without the analyst having to wire them up by hand.
+        feature_mapping: dict[str, str] | None = None,
+        pre_transform: str | None = None,
+        output_kind: str = "scalar",
+        class_labels: list[str] | None = None,
+        target_names: list[str] | None = None,
+        forecast_steps: int | None = None,
     ) -> None:
-        """Stage a bundled model artifact for a function. Same pattern."""
+        """Stage a bundled model artifact for a function."""
         _MODEL_ATTACHMENTS.append({
             "function_id": function_id,
             "model_id": model_id,
@@ -241,6 +293,12 @@ class PackContext:
             "source_path": Path(source_path),
             "train_metrics": train_metrics or {},
             "pack_id": self.pack.id,
+            "feature_mapping": dict(feature_mapping or {}),
+            "pre_transform": pre_transform,
+            "output_kind": output_kind,
+            "class_labels": list(class_labels or []),
+            "target_names": list(target_names or []),
+            "forecast_steps": forecast_steps,
         })
 
 
@@ -306,6 +364,10 @@ def dataset_attachments() -> list[dict]:
 
 def model_attachments() -> list[dict]:
     return list(_MODEL_ATTACHMENTS)
+
+
+def transform_attachments() -> list[dict]:
+    return list(_TRANSFORM_ATTACHMENTS)
 
 
 def plot_attachments() -> list[dict]:

@@ -13,6 +13,7 @@ Monitoring metrics are seeded with synthetic-but-plausible time series so the
 UI looks alive. In production these would be appended each time a run scores
 fresh data against the model.
 """
+import json
 import os
 import random
 import uuid
@@ -25,6 +26,7 @@ import pandas as pd
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 
 from models.schemas import (
+    FromArtifactoryRequest,
     FromUriRequest,
     ModelMetric,
     RegressionRequest,
@@ -71,6 +73,15 @@ def _ingest_pack_models() -> None:
             dest = ARTIFACT_ROOT / rel
             if not dest.exists():
                 dest.write_bytes(src.read_bytes())
+            # Bring along any sibling `_*.py` files (e.g. `_classes.py`)
+            # so pickles that reference custom classes by module name can
+            # resolve them inside the sandbox. The sandbox prepends the
+            # artifact's directory to `sys.path` before unpickling.
+            # `_*` convention skips top-level scripts like `generate.py`.
+            for sibling in src.parent.glob("_*.py"):
+                target = func_dir / sibling.name
+                if not target.exists() or target.read_bytes() != sibling.read_bytes():
+                    target.write_bytes(sibling.read_bytes())
             introspection = None
             if introspect_artifact is not None:
                 try:
@@ -92,6 +103,14 @@ def _ingest_pack_models() -> None:
                 monitoring_metrics=_seed_monitoring("uploaded", 0.92),
                 created_at=now,
                 pack_id=s.get("pack_id"),
+                # Pre-baked workflow execution config — pack ships ready
+                # for the canvas to wire up dataset → model → CSV.
+                feature_mapping=s.get("feature_mapping") or {},
+                pre_transform=s.get("pre_transform"),
+                output_kind=s.get("output_kind") or "scalar",
+                class_labels=s.get("class_labels") or [],
+                target_names=s.get("target_names") or [],
+                forecast_steps=s.get("forecast_steps"),
             )
             _MODELS[m.id] = m
         except Exception:
@@ -295,6 +314,15 @@ async def upload_model(
     file: Annotated[UploadFile, File()],
     name: Annotated[str | None, Form()] = None,
     description: Annotated[str | None, Form()] = None,
+    # ── Workflow-execution config (all optional). The frontend's upload
+    #    modal serializes the structured fields as JSON strings since
+    #    multipart can't carry nested objects natively.
+    output_kind: Annotated[str, Form()] = "scalar",
+    feature_mapping_json: Annotated[str | None, Form()] = None,
+    pre_transform: Annotated[str | None, Form()] = None,
+    class_labels_csv: Annotated[str | None, Form()] = None,
+    target_names_csv: Annotated[str | None, Form()] = None,
+    forecast_steps: Annotated[int | None, Form()] = None,
     _: str = Depends(get_current_user),
 ):
     if not file.filename:
@@ -320,6 +348,18 @@ async def upload_model(
     from agent.model_introspect import introspect_artifact
     introspection = introspect_artifact(abs_path, ext)
 
+    # Parse the structured execution-config fields the modal sent.
+    try:
+        feature_mapping = json.loads(feature_mapping_json) if feature_mapping_json else {}
+    except json.JSONDecodeError:
+        feature_mapping = {}
+    if not isinstance(feature_mapping, dict):
+        feature_mapping = {}
+    class_labels = [c.strip() for c in (class_labels_csv or "").split(",") if c.strip()]
+    target_names = [c.strip() for c in (target_names_csv or "").split(",") if c.strip()]
+    if output_kind not in ("scalar", "probability_vector", "n_step_forecast", "multi_target"):
+        output_kind = "scalar"
+
     now = datetime.utcnow().isoformat() + "Z"
     m = TrainedModel(
         id=mid,
@@ -335,6 +375,12 @@ async def upload_model(
         train_metrics={"uploaded": 1.0, "size_bytes": float(len(contents))},
         monitoring_metrics=_seed_monitoring("uploaded", 0.85),
         created_at=now,
+        feature_mapping=feature_mapping,
+        pre_transform=pre_transform or None,
+        output_kind=output_kind,  # type: ignore[arg-type]
+        class_labels=class_labels,
+        target_names=target_names,
+        forecast_steps=forecast_steps,
     )
     _MODELS[mid] = m
     return m
@@ -375,6 +421,308 @@ async def register_from_uri(req: FromUriRequest, _: str = Depends(get_current_us
         train_metrics={"reference": 1.0},
         monitoring_metrics=_seed_monitoring("external", 0.78),
         created_at=now,
+    )
+    _MODELS[mid] = m
+    return m
+
+
+# ── Install from Artifactory (pip) ──────────────────────────────────────────
+def _pip_install(package_name: str, timeout_sec: int = 180) -> tuple[bool, str]:
+    """Run `pip install <package_name>` in the backend's interpreter.
+
+    Forces the source distribution (`.tar.gz` sdist) for the named
+    package — corporate Artifactory ships these as tar.gz, so we skip
+    wheel resolution entirely and install straight from sdist.
+
+    Returns (ok, combined_log). The combined log captures stdout+stderr
+    and is surfaced to the analyst on failure so corporate Artifactory
+    routing issues / 404s are visible in the UI.
+    """
+    import subprocess
+    import sys
+    try:
+        proc = subprocess.run(
+            [
+                sys.executable, "-m", "pip", "install",
+                "--upgrade",
+                # `--no-binary <pkg>` tells pip to ignore any wheel for
+                # this package and install from the .tar.gz sdist that
+                # the corporate Artifactory publishes.
+                "--no-binary", package_name,
+                package_name,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=timeout_sec,
+        )
+        log = (proc.stdout or "") + (proc.stderr or "")
+        return (proc.returncode == 0), log[-4000:]
+    except subprocess.TimeoutExpired:
+        return False, f"`pip install {package_name}` timed out after {timeout_sec}s."
+
+
+# Method/function names a library might expose for prediction, ranked by
+# preference (sklearn convention first, then time-series + generic names).
+_PREDICT_NAMES = ("predict", "forecast", "infer", "score", "run", "simulate", "__call__")
+
+
+def _entry_metadata(entry, mod) -> dict[str, Any]:
+    """Pull `output_kind`, `target_names`, `class_labels`, `feature_names`
+    off the entry (class or function), with module-level constants as
+    fallback (e.g. `OUTPUT_KIND = "..."`).
+
+    Library authors declare these once on whatever surface is natural for
+    their library — class attrs for OO libs, function attrs for FP libs,
+    or module constants when neither feels right.
+    """
+    def _read(name: str, fallback_const: str):
+        v = getattr(entry, name, None)
+        if v in (None, [], "", {}):
+            v = getattr(mod, fallback_const, None)
+        return v
+
+    return {
+        "output_kind":   _read("output_kind",   "OUTPUT_KIND"),
+        "target_names":  list(_read("target_names",  "TARGET_NAMES")  or []),
+        "class_labels":  list(_read("class_labels",  "CLASS_LABELS")  or []),
+        "feature_names": list(_read("feature_names", "FEATURE_NAMES") or []),
+    }
+
+
+def _resolve_package_entry(module_name: str, entry_hint: str | None):
+    """Pick the prediction entry-point out of a freshly-installed package.
+
+    Returns a tuple `(callable_to_pickle, source_entry, metadata)` where:
+      - `callable_to_pickle` is what we serialize to disk so the sandbox
+        can invoke it. Always callable: an instance (with `.predict`),
+        a bound method (`instance.<method>`), or a module-level function.
+      - `source_entry` is the class or function we discovered (used for
+        attribute introspection).
+      - `metadata` is the extracted output_kind / target_names / etc.
+
+    Discovery order:
+      1. Honor `entry_hint` if set — look it up by name on the module.
+      2. Walk the module's namespace, ranking each top-level name:
+           class with `.predict`           → 100  (sklearn convention)
+           class with `.forecast/.run/...` →  80
+           function named `predict/...`    →  70
+           class with `.__call__`          →  60
+      3. Prefer candidates whose name matches the package, then take the
+         highest score.
+    """
+    import importlib
+    import inspect
+    importlib.invalidate_caches()
+    try:
+        mod = importlib.import_module(module_name)
+    except ImportError as e:
+        raise RuntimeError(f"`import {module_name}` failed after pip install: {e}")
+    # Best-effort reload so a re-install of the same package picks up the
+    # new bytes. Some modules don't have a loader spec (synthetic / test
+    # fixtures, namespace packages without an __init__) — skip cleanly.
+    try:
+        importlib.reload(mod)
+    except (ModuleNotFoundError, ImportError):
+        pass
+
+    def _is_local(obj) -> bool:
+        # Reject things re-exported from elsewhere — we want the package's
+        # own entries, not transitively-imported ones.
+        return (getattr(obj, "__module__", "") or "").startswith(module_name)
+
+    def _build_callable(entry, name: str):
+        """Turn a discovered entry into a (callable, method_used) pair.
+        For classes with `.predict`, returns the instance (sandbox calls
+        `.predict(X)`). For classes with another method, returns the bound
+        method. For functions, returns the function itself."""
+        if inspect.isclass(entry):
+            for method_name in _PREDICT_NAMES:
+                if callable(getattr(entry, method_name, None)):
+                    try:
+                        instance = entry()
+                    except TypeError as e:
+                        raise RuntimeError(
+                            f"Could not instantiate `{name}` with no-arg constructor: {e}. "
+                            "Provide a no-arg factory or pin an explicit `entry_name`."
+                        )
+                    if method_name == "predict":
+                        return instance, "predict"
+                    return getattr(instance, method_name), method_name
+            raise RuntimeError(
+                f"Class `{name}` has no callable predict / forecast / infer / score / run / __call__ method."
+            )
+        if callable(entry):
+            return entry, "__call__"
+        raise RuntimeError(f"Entry `{name}` is neither a class nor a callable.")
+
+    # ── 1. explicit hint ──────────────────────────────────────────────────
+    if entry_hint:
+        entry = getattr(mod, entry_hint, None)
+        if entry is None:
+            raise RuntimeError(
+                f"`{entry_hint}` not found in `{module_name}`. "
+                f"Available top-level names: "
+                f"{sorted(n for n in dir(mod) if not n.startswith('_'))}"
+            )
+        callable_obj, method = _build_callable(entry, entry_hint)
+        return callable_obj, entry, _entry_metadata(entry, mod), method
+
+    # ── 2. heuristic discovery ────────────────────────────────────────────
+    scored: list[tuple[int, str, Any]] = []  # (score, name, entry)
+    for attr_name in dir(mod):
+        if attr_name.startswith("_"):
+            continue
+        obj = getattr(mod, attr_name)
+        if not _is_local(obj):
+            continue
+
+        if inspect.isclass(obj):
+            if callable(getattr(obj, "predict", None)):
+                scored.append((100, attr_name, obj))
+                continue
+            for i, m in enumerate(_PREDICT_NAMES[1:], start=1):
+                if callable(getattr(obj, m, None)):
+                    scored.append((90 - i * 5, attr_name, obj))
+                    break
+            continue
+
+        if inspect.isfunction(obj) or inspect.isbuiltin(obj):
+            if attr_name in _PREDICT_NAMES:
+                scored.append((70, attr_name, obj))
+            continue
+
+    if not scored:
+        raise RuntimeError(
+            f"`{module_name}` was installed but no obvious prediction entry-point "
+            "was found. Looked for classes with predict/forecast/infer/score/run "
+            "methods and module-level functions of the same names. "
+            "Pass `class_name` to pin a specific entry."
+        )
+
+    # Prefer candidates whose name resembles the package
+    norm = module_name.replace("_", "").lower()
+    boosted = [
+        (s + 5, n, e) if (n.replace("_", "").lower() in norm or norm in n.replace("_", "").lower())
+        else (s, n, e)
+        for (s, n, e) in scored
+    ]
+    boosted.sort(key=lambda x: -x[0])
+    _, name, entry = boosted[0]
+    callable_obj, method = _build_callable(entry, name)
+    return callable_obj, entry, _entry_metadata(entry, mod), method
+
+
+@router.post("/from-artifactory", response_model=TrainedModel, status_code=201)
+async def register_from_artifactory(req: FromArtifactoryRequest, _: str = Depends(get_current_user)):
+    """Install a pip-resolvable model package and register it as a model.
+
+    The flow mirrors file-upload registration once the install lands, so
+    the canvas + sandbox path is identical (introspection, feature-name
+    discovery, multi_target post-processing) — the only difference is
+    where the artifact came from."""
+    import pickle
+
+    # 1) pip install — capture stderr verbatim so corporate Artifactory
+    #    routing failures (403, 404, proxy errors) surface in the UI.
+    ok, log = _pip_install(req.package_name)
+    if not ok:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": f"`pip install {req.package_name}` failed.",
+                "log": log,
+                "hint": (
+                    "If you're outside the corporate proxy, the package may not be "
+                    "resolvable. Check the package name and your pip index configuration."
+                ),
+            },
+        )
+
+    # 2) Resolve the prediction entry. Could be a class instance (when
+    #    the class exposes `.predict`), a bound method (when it exposes
+    #    `.forecast/.run/...`), or a top-level function. All three are
+    #    pickleable and callable, so the sandbox treats them uniformly.
+    module_name = req.package_name.replace("-", "_")
+    try:
+        callable_obj, source_entry, meta, method_used = _resolve_package_entry(
+            module_name, req.class_name,
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # 3) Persist the callable as a .pkl. Bound methods + module-level
+    #    functions both pickle cleanly by qualname; the sandbox just
+    #    `pickle.load`s and either calls `.predict(X)` (when the
+    #    artifact is an instance) or `model(X)` (otherwise).
+    mid = f"mdl-{uuid.uuid4().hex[:10]}"
+    func_dir = ARTIFACT_ROOT / req.function_id
+    func_dir.mkdir(parents=True, exist_ok=True)
+    rel = f"{req.function_id}/{mid}.pkl"
+    abs_path = ARTIFACT_ROOT / rel
+    try:
+        with abs_path.open("wb") as fh:
+            pickle.dump(callable_obj, fh)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Could not pickle the installed entry: {e}. "
+                "If this is a closure or lambda, expose it as a module-level "
+                "function or class instead."
+            ),
+        )
+
+    # 4) Best-effort introspection so feature names / metadata appear in
+    #    the model card right away.
+    from agent.model_introspect import introspect_artifact
+    introspection = introspect_artifact(abs_path, "pkl")
+
+    # 5) Resolve output shape: prefer what the library declares, then
+    #    fall back to a heuristic based on the discovered method.
+    declared_kind   = meta["output_kind"]
+    declared_targets = meta["target_names"]
+    declared_labels = meta["class_labels"]
+
+    if declared_kind in ("scalar", "probability_vector", "n_step_forecast", "multi_target"):
+        detected_output_kind = declared_kind
+    elif declared_targets:
+        detected_output_kind = "multi_target"
+    elif declared_labels or callable(getattr(source_entry, "predict_proba", None)):
+        detected_output_kind = "probability_vector"
+    else:
+        detected_output_kind = "scalar"
+
+    # Pin the discovered method into the description so the analyst can
+    # see at a glance how the package is being invoked.
+    base_desc = req.description or f"Installed from Artifactory: `{req.package_name}`"
+    method_tag = f" · invoked via `{method_used}`" if method_used and method_used != "predict" else ""
+
+    now = datetime.utcnow().isoformat() + "Z"
+    m = TrainedModel(
+        id=mid,
+        function_id=req.function_id,
+        name=req.name,
+        description=base_desc + method_tag,
+        source_kind="upload",          # uses the same sandbox path as file-upload
+        model_type="uploaded",
+        artifact_path=rel,
+        file_format="pkl",
+        size_bytes=abs_path.stat().st_size,
+        introspection=introspection,
+        artifactory_uri=f"pip://{req.package_name}",
+        feature_columns=list(meta["feature_names"] or []),
+        train_metrics={
+            "uploaded": 1.0,
+            "size_bytes": float(abs_path.stat().st_size),
+        },
+        monitoring_metrics=_seed_monitoring("uploaded", 0.85),
+        created_at=now,
+        output_kind=detected_output_kind,  # type: ignore[arg-type]
+        class_labels=declared_labels,
+        target_names=declared_targets,
+        # Per-run knobs like forecast_steps are configured at workflow-
+        # build time, not install time.
+        forecast_steps=None,
     )
     _MODELS[mid] = m
     return m

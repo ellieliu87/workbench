@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Plus, Pencil, Trash2, Upload, Wrench, Database, FileText, ShieldAlert, Star, X, Sparkles, Lock, UserCog, Search, AlertTriangle } from 'lucide-react'
+import { Plus, Pencil, Trash2, Upload, Wrench, Database, FileText, ShieldAlert, Star, X, Sparkles, Lock, UserCog, Search, AlertTriangle, ChevronDown, ChevronRight } from 'lucide-react'
 import api from '@/lib/api'
 import type { AgentSkill } from '@/types'
 
@@ -299,86 +299,71 @@ export default function SkillsTab() {
           )
         }
 
-        const SectionHeader = ({
-          icon: Icon, color, title, subtitle, count,
-        }: { icon: any; color: string; title: string; subtitle: string; count: number }) => (
-          <div className="flex items-center gap-2 mb-2 mt-1">
-            <div
-              className="w-6 h-6 rounded-md flex items-center justify-center"
-              style={{ background: `${color}1A`, color }}
-            >
-              <Icon size={13} />
-            </div>
-            <div className="flex items-baseline gap-2 min-w-0">
-              <span className="text-[12px] font-semibold uppercase tracking-widest" style={{ color: 'var(--text-primary)' }}>
-                {title}
-              </span>
-              <span className="text-[10px] font-mono" style={{ color: 'var(--text-muted)' }}>
-                {count} skill{count === 1 ? '' : 's'}
-              </span>
-              <span className="text-[11px] truncate" style={{ color: 'var(--text-muted)' }}>
-                · {subtitle}
-              </span>
-            </div>
-          </div>
-        )
-
         const packIds = Array.from(packedByPack.keys()).sort()
 
         return (
           <>
-            <SectionHeader
+            <CollapsibleSection
+              id="skills:user"
+              defaultOpen
               icon={UserCog}
               color="#D97706"
               title="User-Customized Skills"
               subtitle="Skills you uploaded or created. Editable & deletable."
               count={userCustom.length}
-            />
-            {userCustom.length === 0 ? (
-              <div className="panel text-center py-6 text-xs mb-5" style={{ color: 'var(--text-muted)' }}>
-                None yet. Click <strong>+ New Skill</strong> or <strong>Upload Skill</strong> to add your own.
-              </div>
-            ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-5">
-                {userCustom.map(renderCard)}
-              </div>
-            )}
+              kindLabel="skill"
+            >
+              {userCustom.length === 0 ? (
+                <div className="panel text-center py-6 text-xs mb-5" style={{ color: 'var(--text-muted)' }}>
+                  None yet. Click <strong>+ New Skill</strong> or <strong>Upload Skill</strong> to add your own.
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-5">
+                  {userCustom.map(renderCard)}
+                </div>
+              )}
+            </CollapsibleSection>
 
             {/* One section per domain pack — scales naturally to 5-6 packs. */}
             {packIds.map((pid) => {
               const inPack = packedByPack.get(pid) || []
               return (
-                <div key={pid}>
-                  <SectionHeader
-                    icon={Star}
-                    color="#2563EB"
-                    title={`Domain Pack — ${pid}`}
-                    subtitle="Installed by a domain pack. Read-only here; manage with the pack."
-                    count={inPack.length}
-                  />
+                <CollapsibleSection
+                  key={pid}
+                  id={`skills:pack:${pid}`}
+                  icon={Star}
+                  color="#2563EB"
+                  title={`Domain Pack — ${pid}`}
+                  subtitle="Installed by a domain pack. Read-only here; manage with the pack."
+                  count={inPack.length}
+                  kindLabel="skill"
+                >
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-5">
                     {inPack.map(renderCard)}
                   </div>
-                </div>
+                </CollapsibleSection>
               )
             })}
 
-            <SectionHeader
+            <CollapsibleSection
+              id="skills:builtin"
               icon={Lock}
               color="#0891B2"
               title="Built-in Skills"
               subtitle="Shipped with the workbench. Read-only — fork by editing & saving."
               count={builtin.length}
-            />
-            {builtin.length === 0 ? (
-              <div className="panel text-center py-6 text-xs" style={{ color: 'var(--text-muted)' }}>
-                No built-in skills found in <code>agent/skills/</code>.
-              </div>
-            ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                {builtin.map(renderCard)}
-              </div>
-            )}
+              kindLabel="skill"
+            >
+              {builtin.length === 0 ? (
+                <div className="panel text-center py-6 text-xs" style={{ color: 'var(--text-muted)' }}>
+                  No built-in skills found in <code>agent/skills/</code>.
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {builtin.map(renderCard)}
+                </div>
+              )}
+            </CollapsibleSection>
           </>
         )
       })()}
@@ -549,6 +534,75 @@ function SkillEditor({ state, tools, mcpServers, onClose, onSave, onChange, onTo
         }
       `}</style>
     </>
+  )
+}
+
+// ── Collapsible section header ─────────────────────────────────────────
+// Persists open/closed state per-id in localStorage so the user's
+// choice survives a reload. Only User-Customized opens by default;
+// Domain-Pack and Built-in start collapsed to keep noise out of the way.
+function CollapsibleSection({
+  id, icon: Icon, color, title, subtitle, count, kindLabel = 'item',
+  defaultOpen = false, children,
+}: {
+  id: string
+  icon: any
+  color: string
+  title: string
+  subtitle: string
+  count: number
+  kindLabel?: string
+  defaultOpen?: boolean
+  children: React.ReactNode
+}) {
+  const storageKey = `cma-section-${id}`
+  const [open, setOpen] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem(storageKey)
+      if (saved !== null) return saved === '1'
+    } catch {}
+    return defaultOpen
+  })
+  const toggle = () => {
+    setOpen((prev) => {
+      const next = !prev
+      try { localStorage.setItem(storageKey, next ? '1' : '0') } catch {}
+      return next
+    })
+  }
+  const Chev = open ? ChevronDown : ChevronRight
+  return (
+    <div className="mb-1">
+      <button
+        type="button"
+        onClick={toggle}
+        className="flex items-center gap-2 mb-2 mt-1 w-full text-left rounded-md hover:bg-[var(--bg-elevated)] transition-colors"
+        style={{ background: 'transparent', border: 'none', padding: '4px 6px' }}
+      >
+        <Chev size={13} style={{ color: 'var(--text-muted)' }} />
+        <div
+          className="w-6 h-6 rounded-md flex items-center justify-center"
+          style={{ background: `${color}1A`, color }}
+        >
+          <Icon size={13} />
+        </div>
+        <div className="flex items-baseline gap-2 min-w-0">
+          <span
+            className="text-[12px] font-semibold uppercase tracking-widest"
+            style={{ color: 'var(--text-primary)' }}
+          >
+            {title}
+          </span>
+          <span className="text-[10px] font-mono" style={{ color: 'var(--text-muted)' }}>
+            {count} {kindLabel}{count === 1 ? '' : 's'}
+          </span>
+          <span className="text-[11px] truncate" style={{ color: 'var(--text-muted)' }}>
+            · {subtitle}
+          </span>
+        </div>
+      </button>
+      {open && children}
+    </div>
   )
 }
 

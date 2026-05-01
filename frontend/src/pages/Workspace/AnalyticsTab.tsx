@@ -12,13 +12,14 @@ import {
   FlaskConical, Play, X, Sparkles, Trash2, ChevronRight, AlertCircle,
   CheckCircle2, Database, Boxes, GripVertical, Hand, Layers,
   Snowflake, Cloud, HardDrive, FileText, Settings as SettingsIcon, Download,
-  Loader2,
+  Loader2, Workflow as WorkflowIcon,
 } from 'lucide-react'
 import api from '@/lib/api'
 import { useChatStore } from '@/store/chatStore'
 import type {
   AnalyticsRun, Scenario, TrainedModel, Dataset, WorkflowResult,
   DestinationKind, DestinationWrite, NodeRunStatus, WorkflowValidationResult,
+  WorkflowValidationIssue, WorkflowRunErrorDetail, Transform, DataSource,
 } from '@/types'
 import {
   ResponsiveContainer, LineChart, Line, CartesianGrid, XAxis, YAxis,
@@ -54,7 +55,7 @@ interface Props {
 }
 
 interface NodeData extends Record<string, unknown> {
-  kind: 'dataset' | 'scenario' | 'model' | 'destination'
+  kind: 'dataset' | 'scenario' | 'model' | 'destination' | 'transform'
   ref_id: string
   title: string
   subtitle: string
@@ -112,8 +113,11 @@ function AnalyticsCanvas({ functionId, functionName, onAskAgent, onContextChange
   const [scenarios, setScenarios] = useState<Scenario[]>([])
   const [models, setModels] = useState<TrainedModel[]>([])
   const [datasets, setDatasets] = useState<Dataset[]>([])
+  const [transforms, setTransforms] = useState<Transform[]>([])
+  const [dataSources, setDataSources] = useState<DataSource[]>([])
   const [runs, setRuns] = useState<AnalyticsRun[]>([])
   const [activeRun, setActiveRun] = useState<AnalyticsRun | null>(null)
+  const [transformPanelFor, setTransformPanelFor] = useState<string | null>(null)
 
   // Workflow state
   const [nodes, setNodes] = useState<RFNode<NodeData>[]>([])
@@ -121,6 +125,14 @@ function AnalyticsCanvas({ functionId, functionName, onAskAgent, onContextChange
   const [horizon, setHorizon] = useState(12)
   const [running, setRunning] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Run-context inputs — pinned alongside Horizon. Scenario dropdown
+  // sources from the same /api/analytics/scenarios fetch the canvas
+  // palette uses, so it stays in sync with Data Services.
+  const [scenarioName, setScenarioName] = useState<string>('')
+  const [startDate, setStartDate] = useState<string>('')
+  const [validation, setValidation] = useState<WorkflowValidationResult | null>(null)
+  const [validating, setValidating] = useState(false)
+  const [runError, setRunError] = useState<WorkflowRunErrorDetail | null>(null)
   const [latestWorkflowId, setLatestWorkflowId] = useState<string | null>(null)
   const [lastResult, setLastResult] = useState<WorkflowResult | null>(null)
   const [destConfigFor, setDestConfigFor] = useState<{ nodeId: string; kind: DestinationKind } | null>(null)
@@ -135,8 +147,11 @@ function AnalyticsCanvas({ functionId, functionName, onAskAgent, onContextChange
       api.get<TrainedModel[]>(`/api/models`, { params: { function_id: functionId } }),
       api.get<Dataset[]>(`/api/datasets`, { params: { function_id: functionId } }),
       api.get<AnalyticsRun[]>(`/api/analytics/runs`, { params: { function_id: functionId } }),
-    ]).then(([s, m, d, r]) => {
+      api.get<Transform[]>(`/api/transforms`, { params: { function_id: functionId } }),
+      api.get<DataSource[]>(`/api/datasources`),
+    ]).then(([s, m, d, r, t, ds]) => {
       setScenarios(s.data); setModels(m.data); setDatasets(d.data); setRuns(r.data)
+      setTransforms(t.data); setDataSources(ds.data)
     })
   }
   useEffect(load, [functionId])
@@ -162,7 +177,13 @@ function AnalyticsCanvas({ functionId, functionName, onAskAgent, onContextChange
     if (c.source === c.target) return false
     const target = nodes.find((n) => n.id === c.target)
     if (!target) return false
-    return target.data.kind === 'model' || target.data.kind === 'destination'
+    // Transforms can receive input (e.g. Data Harness → DQC) so they're
+    // valid edge targets alongside models and destinations.
+    return (
+      target.data.kind === 'model'
+      || target.data.kind === 'destination'
+      || target.data.kind === 'transform'
+    )
   }, [nodes])
 
   const onConnect = useCallback(
@@ -258,6 +279,7 @@ function AnalyticsCanvas({ functionId, functionName, onAskAgent, onContextChange
 
     setRunning(true)
     setError(null)
+    setRunError(null)
     setLastResult(null)
     // Mark all model + destination nodes as 'running' for immediate visual feedback
     setNodes((ns) => ns.map((n) =>
@@ -274,6 +296,8 @@ function AnalyticsCanvas({ functionId, functionName, onAskAgent, onContextChange
         })),
         edges: edges.map((e) => ({ source: e.source, target: e.target })),
         horizon_months: horizon,
+        scenario_name: scenarioName || undefined,
+        start_date: startDate || undefined,
       })
       setLatestWorkflowId(r.data.workflow_id)
       setLastResult(r.data)
@@ -286,10 +310,25 @@ function AnalyticsCanvas({ functionId, functionName, onAskAgent, onContextChange
           downloadCsv(d.csv_filename, d.csv_data)
         }
       }
-      if (r.data.error) setError(r.data.error)
+      if (r.data.error_detail) {
+        setRunError(r.data.error_detail)
+      } else if (r.data.error) {
+        setError(r.data.error)
+      }
     } catch (e: any) {
-      setError(e?.response?.data?.detail || 'Workflow run failed')
-      // Reset transient running statuses
+      // Backend HTTPException(detail=…) — sometimes a structured dict, sometimes a string.
+      const detail = e?.response?.data?.detail
+      if (detail && typeof detail === 'object') {
+        setRunError({
+          code: detail.code || 'GENERIC',
+          what_happened: detail.error || detail.message || 'Workflow run failed.',
+          how_to_fix: detail.hint
+            || 'Inspect the failed step\'s details below, or click "Validate" before running again.',
+          raw: detail,
+        })
+      } else {
+        setError(typeof detail === 'string' ? detail : 'Workflow run failed')
+      }
       setNodes((ns) => ns.map((n) => ({ ...n, data: { ...n.data, status: 'failed' as NodeRunStatus } })))
     } finally {
       setRunning(false)
@@ -300,18 +339,88 @@ function AnalyticsCanvas({ functionId, functionName, onAskAgent, onContextChange
     setNodes([])
     setEdges([])
     setError(null)
+    setValidation(null)
+    setRunError(null)
   }
 
-  const askValidator = () => {
+  // ── Validate workflow ────────────────────────────────────────
+  // First click runs the local + backend checks and renders the issue panel.
+  // The "Ask the validator agent" button inside the panel hands off to chat
+  // for deeper / open-ended troubleshooting.
+  const runValidate = async () => {
+    if (nodes.length === 0) {
+      setValidation({
+        ok: false,
+        issues: [{
+          severity: 'error',
+          code: 'WORKFLOW_EMPTY',
+          message: 'Workflow is empty.',
+          hint: 'Drag a dataset and a model onto the canvas to get started.',
+        }],
+      })
+      return
+    }
+    setValidating(true)
+    try {
+      const r = await api.post<WorkflowValidationResult>('/api/analytics/workflow-validate', {
+        function_id: functionId,
+        nodes: nodes.map((n) => ({
+          id: n.id, kind: n.data.kind, ref_id: n.data.ref_id, config: n.data.config || {},
+        })),
+        edges: edges.map((e) => ({ source: e.source, target: e.target })),
+      })
+      setValidation(r.data)
+    } catch (e: any) {
+      setValidation({
+        ok: false,
+        issues: [{
+          severity: 'error',
+          code: 'VALIDATE_FAILED',
+          message: 'Could not reach the validator.',
+          hint: e?.response?.data?.detail || e?.message || 'Check your connection and try again.',
+        }],
+      })
+    } finally {
+      setValidating(false)
+    }
+  }
+
+  const askValidatorAgent = () => {
     setEntity('workflow', null)
     setPayload({
       nodes: nodes.map((n) => ({
         id: n.id, kind: n.data.kind, ref_id: n.data.ref_id, config: n.data.config || {},
       })),
       edges: edges.map((e) => ({ source: e.source, target: e.target })),
+      issues: validation?.issues ?? [],
     })
     setOpen(true)
-    window.dispatchEvent(new CustomEvent('cma-chat', { detail: 'Validate the workflow.' }))
+    window.dispatchEvent(new CustomEvent('cma-chat', {
+      detail: validation && validation.issues.length > 0
+        ? `Help me fix these workflow issues: ${validation.issues.map((i) => i.message).join('; ')}`
+        : 'Validate the workflow.',
+    }))
+  }
+
+  const askRunErrorAgent = () => {
+    if (!runError) return
+    setEntity('workflow', null)
+    setPayload({
+      nodes: nodes.map((n) => ({
+        id: n.id, kind: n.data.kind, ref_id: n.data.ref_id, config: n.data.config || {},
+      })),
+      edges: edges.map((e) => ({ source: e.source, target: e.target })),
+      run_error: runError,
+    })
+    setOpen(true)
+    window.dispatchEvent(new CustomEvent('cma-chat', {
+      detail: `The workflow failed at step ${runError.step_index ?? '?'} (${runError.node_label ?? 'a model'}): ${runError.what_happened}. How do I fix this?`,
+    }))
+  }
+
+  const highlightNode = (nodeId: string | null | undefined) => {
+    if (!nodeId) return
+    setNodes((ns) => ns.map((n) => ({ ...n, selected: n.id === nodeId })))
   }
 
   const askTroubleshooter = (run: AnalyticsRun) => {
@@ -480,6 +589,35 @@ function AnalyticsCanvas({ functionId, functionName, onAskAgent, onContextChange
             ))}
           </Palette>
 
+          <Palette
+            title={`Data Services (${transforms.length})`}
+            icon={WorkflowIcon}
+            color="#EA580C"
+            empty={transforms.length === 0 ? 'No ETL transforms registered for this function yet.' : null}
+          >
+            {transforms.map((t) => {
+              const src = t.input_data_source_ids
+                .map((id) => dataSources.find((x) => x.id === id)?.name || id)
+                .filter(Boolean)
+              const sub = src.length ? `from ${src[0]}` : 'ETL recipe'
+              return (
+                <PaletteCard
+                  key={t.id}
+                  title={t.name}
+                  subtitle={sub}
+                  color="#EA580C"
+                  payload={{
+                    kind: 'transform', ref_id: t.id,
+                    title: t.name,
+                    subtitle: sub,
+                    color: '#EA580C',
+                  }}
+                  onClick={(p) => addFromClick(p)}
+                />
+              )
+            })}
+          </Palette>
+
           <Palette title={`Scenarios (${scenarios.length})`} icon={FlaskConical} color="#0891B2">
             {scenarios.map((s) => (
               <PaletteCard
@@ -566,6 +704,8 @@ function AnalyticsCanvas({ functionId, functionName, onAskAgent, onContextChange
               const data = n.data as NodeData
               if (data.kind === 'destination') {
                 setDestConfigFor({ nodeId: n.id, kind: data.ref_id as DestinationKind })
+              } else if (data.kind === 'transform') {
+                setTransformPanelFor(n.id)
               }
             }}
             nodeTypes={NODE_TYPES}
@@ -596,6 +736,28 @@ function AnalyticsCanvas({ functionId, functionName, onAskAgent, onContextChange
       </div>
       )}
 
+      {/* Validation feedback */}
+      {validation && (
+        <WorkflowValidationPanel
+          result={validation}
+          onClose={() => setValidation(null)}
+          onHighlight={highlightNode}
+          onAskAgent={askValidatorAgent}
+          onRevalidate={runValidate}
+          revalidating={validating}
+        />
+      )}
+
+      {/* Run-time failure card */}
+      {runError && (
+        <WorkflowRunErrorCard
+          detail={runError}
+          onClose={() => setRunError(null)}
+          onHighlight={highlightNode}
+          onAskAgent={askRunErrorAgent}
+        />
+      )}
+
       {/* Status strip — most recent workflow result */}
       {lastResult && (
         <ResultStatusStrip
@@ -606,11 +768,32 @@ function AnalyticsCanvas({ functionId, functionName, onAskAgent, onContextChange
 
       {/* Run controls */}
       <div className="panel mb-6 flex items-end gap-3 flex-wrap" style={{ padding: 14 }}>
-        <Field label="Horizon (months)" className="w-32">
+        <Field label="Horizon (months)" className="w-28">
           <input
             type="number" min={1} max={500} className="input"
             value={horizon}
             onChange={(e) => setHorizon(Math.max(1, Math.min(500, parseInt(e.target.value || '12'))))}
+          />
+        </Field>
+        <Field label="Scenario" className="w-52">
+          <select
+            className="input"
+            value={scenarioName}
+            onChange={(e) => setScenarioName(e.target.value)}
+            title="CCAR + Outlook scenarios from the Data tab"
+          >
+            <option value="">— none —</option>
+            {scenarios.map((s) => (
+              <option key={s.id} value={s.name}>{s.name}</option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Start date" className="w-40">
+          <input
+            type="date"
+            className="input"
+            value={startDate}
+            onChange={(e) => setStartDate(e.target.value)}
           />
         </Field>
         <div className="flex-1 min-w-[200px]">
@@ -627,13 +810,14 @@ function AnalyticsCanvas({ functionId, functionName, onAskAgent, onContextChange
         </div>
         <div className="flex gap-2">
           <button
-            onClick={askValidator}
-            disabled={nodes.length === 0}
+            onClick={runValidate}
+            disabled={nodes.length === 0 || validating}
             className="px-3 py-2 rounded-lg text-xs font-semibold disabled:opacity-40 flex items-center gap-1.5"
             style={{ background: 'var(--bg-card)', border: '1px solid #D97706', color: '#D97706' }}
-            title="Have the Workflow Validator check this design"
+            title="Check the workflow for missing inputs, mismatched features, and configuration gaps"
           >
-            ✓ Validate
+            {validating ? <Loader2 size={13} className="animate-spin" /> : '✓'}
+            {validating ? 'Validating…' : 'Validate'}
           </button>
           <button
             onClick={clearCanvas}
@@ -720,6 +904,34 @@ function AnalyticsCanvas({ functionId, functionName, onAskAgent, onContextChange
         )
       })()}
 
+      {transformPanelFor && (() => {
+        const node = nodes.find((n) => n.id === transformPanelFor)
+        if (!node) return null
+        const t = transforms.find((x) => x.id === node.data.ref_id)
+        if (!t) return null
+        const sourceNames = t.input_data_source_ids
+          .map((id) => dataSources.find((x) => x.id === id)?.name || id)
+          .filter(Boolean)
+        const outputDs = datasets.find((d) => d.id === t.output_dataset_id)
+        return (
+          <TransformInspector
+            node={node}
+            transform={t}
+            datasets={datasets}
+            models={models}
+            sourceNames={sourceNames}
+            outputDatasetName={outputDs?.name || t.output_dataset_id || '(no output dataset)'}
+            onSave={(cfg, subtitle) => updateNodeConfig(node.id, cfg, subtitle)}
+            onRemove={() => {
+              setNodes((ns) => ns.filter((n) => n.id !== node.id))
+              setEdges((es) => es.filter((e) => e.source !== node.id && e.target !== node.id))
+              setTransformPanelFor(null)
+            }}
+            onClose={() => setTransformPanelFor(null)}
+          />
+        )
+      })()}
+
       <style>{`
         .input {
           width: 100%; padding: 8px 10px; border-radius: 8px; font-size: 13px;
@@ -755,12 +967,21 @@ function DestinationNode({ data, selected }: NodeProps) {
   const meta = DESTINATION_META[d.ref_id as DestinationKind]
   return <NodeCard data={d} selected={!!selected} icon={meta?.icon || Download} hasInput={true} hasOutput={false} />
 }
+function TransformNode({ data, selected }: NodeProps) {
+  const d = data as NodeData
+  // Transforms accept BOTH a left input (so Data Harness can flow into
+  // a downstream DQC) AND a right output (feeding models or another
+  // transform). When no upstream is wired, the transform falls back to
+  // its declared `output_dataset_id` — that's the source-transform path.
+  return <NodeCard data={d} selected={!!selected} icon={WorkflowIcon} hasInput={true} hasOutput={true} />
+}
 
 const NODE_TYPES = {
   dataset: DatasetNode,
   scenario: ScenarioNode,
   model: ModelNode,
   destination: DestinationNode,
+  transform: TransformNode,
 }
 
 function NodeCard({
@@ -1300,6 +1521,232 @@ const tooltipStyle = {
   color: 'var(--text-primary)',
 }
 
+// ── Validation panel ──────────────────────────────────────────────────
+const SEVERITY_TONE: Record<WorkflowValidationIssue['severity'], { color: string; bg: string; icon: typeof AlertCircle; label: string }> = {
+  error:   { color: 'var(--error)',   bg: 'var(--error-bg)',   icon: AlertCircle,   label: 'BLOCKER' },
+  warning: { color: 'var(--warning)', bg: 'var(--warning-bg)', icon: AlertCircle,   label: 'WARNING' },
+  info:    { color: 'var(--accent)',  bg: 'var(--accent-light)', icon: Sparkles,    label: 'NOTE'    },
+}
+
+function WorkflowValidationPanel({
+  result, onClose, onHighlight, onAskAgent, onRevalidate, revalidating,
+}: {
+  result: WorkflowValidationResult
+  onClose: () => void
+  onHighlight: (nodeId: string | null | undefined) => void
+  onAskAgent: () => void
+  onRevalidate: () => void
+  revalidating: boolean
+}) {
+  const errors = result.issues.filter((i) => i.severity === 'error')
+  const warnings = result.issues.filter((i) => i.severity === 'warning')
+  const infos = result.issues.filter((i) => i.severity === 'info')
+  const ok = result.ok && result.issues.length === 0
+  const headerColor = ok ? 'var(--success)' : errors.length ? 'var(--error)' : 'var(--warning)'
+  const headerBg = ok ? 'var(--success-bg)' : errors.length ? 'var(--error-bg)' : 'var(--warning-bg)'
+
+  return (
+    <div className="panel mb-4" style={{ padding: 0, overflow: 'hidden', borderColor: headerColor }}>
+      <div
+        className="flex items-center justify-between px-4 py-2"
+        style={{ background: headerBg, color: headerColor, fontWeight: 600 }}
+      >
+        <div className="flex items-center gap-2">
+          {ok ? <CheckCircle2 size={14} /> : <AlertCircle size={14} />}
+          <span style={{ fontSize: 13 }}>
+            {ok
+              ? 'Workflow looks good — no issues found.'
+              : `Validation: ${errors.length} blocker${errors.length === 1 ? '' : 's'}` +
+                (warnings.length ? `, ${warnings.length} warning${warnings.length === 1 ? '' : 's'}` : '') +
+                (infos.length ? `, ${infos.length} note${infos.length === 1 ? '' : 's'}` : '')}
+          </span>
+          {!ok && (
+            <span className="font-mono" style={{ fontSize: 11, opacity: 0.7, marginLeft: 4 }}>
+              fix blockers before running
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-1">
+          <button
+            onClick={onRevalidate}
+            disabled={revalidating}
+            className="text-[11px] font-semibold px-2 py-1 rounded-md disabled:opacity-50"
+            style={{ color: headerColor }}
+            title="Re-run validation"
+          >
+            {revalidating ? 'Checking…' : 'Re-check'}
+          </button>
+          <button onClick={onClose} className="p-1 rounded-md" style={{ color: headerColor }} title="Dismiss">
+            <X size={14} />
+          </button>
+        </div>
+      </div>
+
+      {!ok && (
+        <div style={{ borderTop: '1px solid var(--border-subtle)' }}>
+          <ul className="divide-y" style={{ borderColor: 'var(--border-subtle)' }}>
+            {[...errors, ...warnings, ...infos].map((issue, i) => (
+              <ValidationIssueRow key={`${issue.code}-${i}`} issue={issue} onHighlight={onHighlight} />
+            ))}
+          </ul>
+        </div>
+      )}
+
+      <div
+        className="flex items-center justify-between px-4 py-2 text-xs"
+        style={{ borderTop: '1px solid var(--border-subtle)', background: 'var(--bg-elevated)' }}
+      >
+        <span style={{ color: 'var(--text-muted)' }}>
+          {ok
+            ? "You're good to hit Run Workflow."
+            : 'Click a row to highlight the node on the canvas.'}
+        </span>
+        <button
+          onClick={onAskAgent}
+          className="font-semibold px-2 py-1 rounded-md flex items-center gap-1"
+          style={{ color: 'var(--accent)' }}
+          title="Open the chat panel with these issues attached"
+        >
+          <Sparkles size={12} /> Ask the validator agent
+          <ChevronRight size={12} />
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function ValidationIssueRow({
+  issue, onHighlight,
+}: { issue: WorkflowValidationIssue; onHighlight: (id: string | null | undefined) => void }) {
+  const tone = SEVERITY_TONE[issue.severity]
+  const Icon = tone.icon
+  return (
+    <li
+      className="px-4 py-2.5 text-xs flex items-start gap-3 cursor-pointer hover:bg-[var(--bg-elevated)]"
+      onClick={() => onHighlight(issue.node_id)}
+    >
+      <span
+        className="font-mono font-bold shrink-0 px-1.5 py-0.5 rounded"
+        style={{ color: tone.color, background: tone.bg, fontSize: 10, letterSpacing: '0.05em' }}
+      >
+        {tone.label}
+      </span>
+      <div className="flex-1 min-w-0">
+        <div style={{ color: 'var(--text-primary)', fontWeight: 500 }}>
+          <Icon size={12} style={{ display: 'inline', verticalAlign: '-2px', marginRight: 4, color: tone.color }} />
+          {issue.message}
+        </div>
+        {issue.hint && (
+          <div className="mt-1" style={{ color: 'var(--text-secondary)', lineHeight: 1.55 }}>
+            {issue.hint}
+          </div>
+        )}
+      </div>
+      {issue.node_id && (
+        <span
+          className="text-[10px] font-semibold shrink-0 self-center"
+          style={{ color: 'var(--text-muted)' }}
+        >
+          ↗ highlight
+        </span>
+      )}
+    </li>
+  )
+}
+
+// ── Run-time error card ──────────────────────────────────────────────
+function WorkflowRunErrorCard({
+  detail, onClose, onHighlight, onAskAgent,
+}: {
+  detail: WorkflowRunErrorDetail
+  onClose: () => void
+  onHighlight: (id: string | null | undefined) => void
+  onAskAgent: () => void
+}) {
+  const stepLabel = detail.step_index ? `Step ${detail.step_index}` : 'a step'
+  const nodeLabel = detail.node_label || 'a model'
+  return (
+    <div
+      className="panel mb-4"
+      style={{ padding: 0, overflow: 'hidden', borderColor: 'var(--error)' }}
+    >
+      <div
+        className="flex items-center justify-between px-4 py-2"
+        style={{ background: 'var(--error-bg)', color: 'var(--error)', fontWeight: 600 }}
+      >
+        <div className="flex items-center gap-2">
+          <AlertCircle size={14} />
+          <span style={{ fontSize: 13 }}>
+            Run failed at {stepLabel} · <span className="font-mono">{nodeLabel}</span>
+          </span>
+          <span
+            className="font-mono px-1.5 py-0.5 rounded"
+            style={{ fontSize: 10, background: 'var(--error)', color: '#fff', marginLeft: 4 }}
+          >
+            {detail.code}
+          </span>
+        </div>
+        <button onClick={onClose} className="p-1 rounded-md" style={{ color: 'var(--error)' }} title="Dismiss">
+          <X size={14} />
+        </button>
+      </div>
+
+      <div className="px-4 py-3 space-y-3">
+        <div>
+          <div
+            className="text-[10px] font-bold uppercase tracking-widest mb-1"
+            style={{ color: 'var(--text-muted)' }}
+          >
+            What happened
+          </div>
+          <div
+            className="text-xs font-mono leading-relaxed"
+            style={{ color: 'var(--text-primary)' }}
+          >
+            {detail.what_happened}
+          </div>
+        </div>
+        <div>
+          <div
+            className="text-[10px] font-bold uppercase tracking-widest mb-1"
+            style={{ color: 'var(--text-muted)' }}
+          >
+            How to fix
+          </div>
+          <div className="text-xs leading-relaxed" style={{ color: 'var(--text-secondary)' }}>
+            {detail.how_to_fix}
+          </div>
+        </div>
+      </div>
+
+      <div
+        className="flex items-center justify-between px-4 py-2 text-xs"
+        style={{ borderTop: '1px solid var(--border-subtle)', background: 'var(--bg-elevated)' }}
+      >
+        {detail.node_id ? (
+          <button
+            onClick={() => onHighlight(detail.node_id)}
+            className="font-semibold flex items-center gap-1"
+            style={{ color: 'var(--text-secondary)' }}
+          >
+            ↗ Highlight failed step on canvas
+          </button>
+        ) : (
+          <span style={{ color: 'var(--text-muted)' }}>&nbsp;</span>
+        )}
+        <button
+          onClick={onAskAgent}
+          className="font-semibold px-2 py-1 rounded-md flex items-center gap-1"
+          style={{ color: 'var(--accent)' }}
+        >
+          <Sparkles size={12} /> Ask the troubleshooter
+          <ChevronRight size={12} />
+        </button>
+      </div>
+    </div>
+  )
+}
+
 // ── Result status strip ────────────────────────────────────────────────
 function ResultStatusStrip({
   result, onClear,
@@ -1407,6 +1854,299 @@ function DestinationStatusRow({ d }: { d: DestinationWrite }) {
 }
 
 // ── Destination config modal ───────────────────────────────────────────
+// ── Transform inspector (right-side drawer) ─────────────────────────────
+function TransformInspector({
+  node, transform, datasets, models,
+  sourceNames, outputDatasetName,
+  onSave, onRemove, onClose,
+}: {
+  node: RFNode<NodeData>
+  transform: Transform
+  datasets: Dataset[]
+  models: TrainedModel[]
+  sourceNames: string[]
+  outputDatasetName: string
+  onSave: (cfg: Record<string, any>, subtitle: string) => void
+  onRemove: () => void
+  onClose: () => void
+}) {
+  // Per-node config — selections live on this canvas instance, so the
+  // user can drop two Data Harnesses with different configs.
+  const initialDatasets: string[] = (node.data.config?.read_dataset_ids as string[]) || []
+  const initialModels: string[] = (node.data.config?.requirement_model_ids as string[]) || []
+  const [selectedDatasets, setSelectedDatasets] = useState<string[]>(initialDatasets)
+  const [selectedModels, setSelectedModels] = useState<string[]>(initialModels)
+
+  const toggleDataset = (id: string) => {
+    setSelectedDatasets((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id])
+  }
+  const toggleModel = (id: string) => {
+    setSelectedModels((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id])
+  }
+
+  // Auto-save on every change so the canvas immediately reflects the
+  // user's selections (no separate Save button to remember).
+  useEffect(() => {
+    const subtitleBits: string[] = []
+    if (selectedDatasets.length) subtitleBits.push(`${selectedDatasets.length} dataset${selectedDatasets.length === 1 ? '' : 's'}`)
+    if (selectedModels.length)   subtitleBits.push(`${selectedModels.length} model req${selectedModels.length === 1 ? '' : 's'}`)
+    const subtitle = subtitleBits.length
+      ? subtitleBits.join(' · ')
+      : (sourceNames.length ? `from ${sourceNames[0]}` : 'ETL recipe')
+    onSave(
+      {
+        ...(node.data.config || {}),
+        read_dataset_ids: selectedDatasets,
+        requirement_model_ids: selectedModels,
+      },
+      subtitle,
+    )
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedDatasets, selectedModels])
+
+  const confirmRemove = () => {
+    if (window.confirm(`Remove "${transform.name}" from the canvas? This won't delete the transform itself — you can drag it back from the palette.`)) {
+      onRemove()
+    }
+  }
+
+  return (
+    <>
+      <div
+        onClick={onClose}
+        style={{
+          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.35)', zIndex: 50,
+        }}
+      />
+      <div
+        className="panel"
+        style={{
+          position: 'fixed',
+          top: 0, right: 0, bottom: 0,
+          width: 'min(620px, 92vw)',
+          padding: 0,
+          borderRadius: 0,
+          borderRight: 'none',
+          borderTop: 'none',
+          borderBottom: 'none',
+          borderLeft: '1px solid var(--border)',
+          zIndex: 60,
+          display: 'flex', flexDirection: 'column',
+        }}
+      >
+        <div
+          className="px-4 py-3 flex items-center justify-between"
+          style={{ borderBottom: '1px solid var(--border-subtle)', background: 'var(--bg-elevated)' }}
+        >
+          <div className="flex items-center gap-2">
+            <div
+              className="w-8 h-8 rounded-lg flex items-center justify-center"
+              style={{ background: '#EA580C1A', color: '#EA580C' }}
+            >
+              <WorkflowIcon size={16} />
+            </div>
+            <div>
+              <div className="text-sm font-bold" style={{ color: 'var(--text-primary)' }}>
+                {transform.name}
+              </div>
+              <div className="text-[11px] font-mono" style={{ color: 'var(--text-muted)' }}>
+                ETL transform · {transform.source}
+              </div>
+            </div>
+          </div>
+          <button onClick={onClose} className="p-1.5 rounded-md" title="Close">
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-4 space-y-4">
+          {transform.description && (
+            <p className="text-xs leading-relaxed" style={{ color: 'var(--text-secondary)' }}>
+              {transform.description}
+            </p>
+          )}
+
+          {/* Lineage strip */}
+          <div className="grid grid-cols-3 gap-2 text-[11px]">
+            <LineageCell
+              label="READS FROM"
+              value={sourceNames.length ? sourceNames.join(' · ') : '(none)'}
+              color="#0078D4"
+            />
+            <LineageCell label="" value="→" color="var(--text-muted)" centered />
+            <LineageCell label="MATERIALIZES" value={outputDatasetName} color="#059669" />
+          </div>
+
+          {/* ── Read data from (datasets, multi-select) ─────────────── */}
+          <MultiSelectGroup
+            title="Read data from"
+            sublabel="Datasets registered on the Data tab. Pick the ones this harness should pull rows from. Multiple selections are joined."
+            empty="No datasets configured yet — add one on the Data tab."
+            items={datasets.map((d) => ({
+              id: d.id,
+              title: d.name,
+              hint: `${d.source_kind === 'upload' ? 'upload' : 'sql'} · ${d.columns.length} cols${d.row_count != null ? ` · ${d.row_count.toLocaleString()} rows` : ''}`,
+            }))}
+            selectedIds={selectedDatasets}
+            onToggle={toggleDataset}
+            color="#059669"
+          />
+
+          {/* ── Match requirements of (models, multi-select) ────────── */}
+          <MultiSelectGroup
+            title="Match requirements of"
+            sublabel="Models registered on the Models tab. The harness ensures the rows it materializes carry every feature these models require."
+            empty="No models configured yet — register one on the Models tab."
+            items={models.map((m) => ({
+              id: m.id,
+              title: m.name,
+              hint: `${m.model_type.toUpperCase()}${m.feature_columns?.length ? ` · ${m.feature_columns.length} features` : ''}`,
+            }))}
+            selectedIds={selectedModels}
+            onToggle={toggleModel}
+            color="#7C3AED"
+          />
+
+        </div>
+
+        {/* Footer — Remove + close. Selecting a node + pressing
+            Delete / Backspace also removes it; this button is the
+            discoverable equivalent for users who didn't know that. */}
+        <div
+          className="px-4 py-3 flex items-center justify-between"
+          style={{ borderTop: '1px solid var(--border-subtle)', background: 'var(--bg-elevated)' }}
+        >
+          <button
+            onClick={confirmRemove}
+            className="text-[11px] font-semibold px-2.5 py-1.5 rounded-md flex items-center gap-1.5"
+            style={{ color: 'var(--error)', border: '1px solid var(--error)', background: 'transparent' }}
+            title="Remove this node from the canvas"
+          >
+            <Trash2 size={12} /> Remove from canvas
+          </button>
+          <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
+            tip: select a node and press <span className="font-mono">Delete</span> to remove it
+          </span>
+        </div>
+      </div>
+    </>
+  )
+}
+
+function MultiSelectGroup({
+  title, sublabel, empty, items, selectedIds, onToggle, color,
+}: {
+  title: string
+  sublabel: string
+  empty: string
+  items: { id: string; title: string; hint: string }[]
+  selectedIds: string[]
+  onToggle: (id: string) => void
+  color: string
+}) {
+  const allSelected = items.length > 0 && selectedIds.length === items.length
+  return (
+    <div>
+      <div className="flex items-baseline justify-between mb-1.5">
+        <div
+          className="text-[10px] font-bold uppercase tracking-widest"
+          style={{ color: 'var(--text-muted)' }}
+        >
+          {title}
+        </div>
+        <div className="text-[10px] font-mono" style={{ color }}>
+          {selectedIds.length} / {items.length} selected
+        </div>
+      </div>
+      <div className="text-[11px] mb-2" style={{ color: 'var(--text-muted)', lineHeight: 1.55 }}>
+        {sublabel}
+      </div>
+      {items.length === 0 ? (
+        <div
+          className="text-[11px] px-3 py-2 rounded-md"
+          style={{ background: 'var(--bg-elevated)', color: 'var(--text-muted)', border: '1px dashed var(--border)' }}
+        >
+          {empty}
+        </div>
+      ) : (
+        <div
+          className="rounded-md divide-y"
+          style={{ border: '1px solid var(--border-subtle)', borderColor: 'var(--border-subtle)' }}
+        >
+          <label
+            className="px-3 py-1.5 flex items-center gap-2 text-[11px] font-semibold cursor-pointer"
+            style={{ color: 'var(--text-secondary)', background: 'var(--bg-elevated)' }}
+          >
+            <input
+              type="checkbox"
+              checked={allSelected}
+              onChange={() => {
+                items.forEach((i) => {
+                  const isSelected = selectedIds.includes(i.id)
+                  if (allSelected && isSelected) onToggle(i.id)
+                  if (!allSelected && !isSelected) onToggle(i.id)
+                })
+              }}
+            />
+            {allSelected ? 'Unselect all' : 'Select all'}
+          </label>
+          {items.map((it) => (
+            <label
+              key={it.id}
+              className="px-3 py-2 flex items-center gap-2 cursor-pointer hover:bg-[var(--bg-elevated)]"
+            >
+              <input
+                type="checkbox"
+                checked={selectedIds.includes(it.id)}
+                onChange={() => onToggle(it.id)}
+              />
+              <div className="min-w-0 flex-1">
+                <div className="text-[12px] font-semibold truncate" style={{ color: 'var(--text-primary)' }}>
+                  {it.title}
+                </div>
+                <div className="text-[10px] font-mono truncate" style={{ color: 'var(--text-muted)' }}>
+                  {it.hint}
+                </div>
+              </div>
+            </label>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function LineageCell({
+  label, value, color, centered,
+}: { label: string; value: string; color: string; centered?: boolean }) {
+  return (
+    <div
+      className="rounded-md px-2 py-2"
+      style={{
+        background: 'var(--bg-elevated)',
+        border: '1px solid var(--border-subtle)',
+        textAlign: centered ? 'center' : 'left',
+      }}
+    >
+      {label && (
+        <div
+          className="text-[9px] font-bold uppercase tracking-widest mb-1"
+          style={{ color: 'var(--text-muted)' }}
+        >
+          {label}
+        </div>
+      )}
+      <div
+        className="text-[11px] font-semibold truncate"
+        style={{ color }}
+        title={value}
+      >
+        {value}
+      </div>
+    </div>
+  )
+}
+
 function DestinationConfigModal({
   kind, initial, onClose, onSave,
 }: {

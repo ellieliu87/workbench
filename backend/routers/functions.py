@@ -47,40 +47,18 @@ BUSINESS_FUNCTIONS: list[BusinessFunction] = [
         sample_metrics=["1d VaR", "SVaR", "IRC", "BT Exceptions"],
     ),
     BusinessFunction(
-        id="credit_risk",
-        name="Credit Risk Analytics",
-        short_name="Credit",
-        description="Portfolio PD/LGD, vintage roll-rates, charge-off forecasts, and CECL allowance walk.",
-        icon="shield-alert",
-        color="#DC2626",
-        category="Markets & Risk",
-        default_views=["Vintage Roll Rates", "PD Distribution", "Charge-off Forecast", "CECL Walk"],
-        sample_metrics=["PD", "LGD", "Charge-off Rate", "Allowance"],
-    ),
-
-    # ── Treasury & Balance Sheet ───────────────────────────────────────────
-    BusinessFunction(
         id="interest_rate_risk",
         name="Interest Rate Risk Management",
         short_name="IRR",
         description="EVE and NII sensitivities to parallel shocks, twists, and curve steepeners. ALCO-ready views.",
         icon="line-chart",
         color="#0891B2",
-        category="Treasury & Balance Sheet",
+        category="Markets & Risk",
         default_views=["EVE Shock Profile", "NII Sensitivity", "Key Rate Durations", "Hedge Ladder"],
         sample_metrics=["EVE +200bp", "NII 12M", "DV01", "Hedge Notional"],
     ),
-    BusinessFunction(
-        id="treasury",
-        name="Treasury & Funds Transfer Pricing",
-        short_name="Treasury",
-        description="FTP curves by tenor & product, NIM attribution, intercompany funding flows, surplus deployment.",
-        icon="banknote",
-        color="#7C3AED",
-        category="Treasury & Balance Sheet",
-        default_views=["FTP Curve", "NIM Walk", "Funding Flows", "Surplus Deployment"],
-        sample_metrics=["FTP 5Y", "NIM", "Funding Cost", "Surplus"],
-    ),
+
+    # ── Treasury & Capital ─────────────────────────────────────────────────
     BusinessFunction(
         id="liquidity_management",
         name="Liquidity & Funding",
@@ -88,12 +66,10 @@ BUSINESS_FUNCTIONS: list[BusinessFunction] = [
         description="HQLA stack, LCR/NSFR, deposit beta, and projected cash ladders for the bank's funding profile.",
         icon="droplet",
         color="#059669",
-        category="Treasury & Balance Sheet",
+        category="Treasury & Capital",
         default_views=["HQLA Stack", "LCR Trend", "Deposit Mix", "Cash Ladder"],
         sample_metrics=["HQLA", "LCR", "NSFR", "Deposit Beta"],
     ),
-
-    # ── Capital & Performance ──────────────────────────────────────────────
     BusinessFunction(
         id="capital_planning",
         name="Capital Planning & CCAR",
@@ -101,7 +77,7 @@ BUSINESS_FUNCTIONS: list[BusinessFunction] = [
         description="CET1, RWA, stress scenario PPNR, and capital actions tracking against CCAR submissions.",
         icon="building-2",
         color="#D97706",
-        category="Capital & Performance",
+        category="Treasury & Capital",
         default_views=["CET1 Trajectory", "RWA Composition", "Stress PPNR", "Capital Actions"],
         sample_metrics=["CET1", "RWA", "Tier 1", "SCB"],
     ),
@@ -112,7 +88,7 @@ BUSINESS_FUNCTIONS: list[BusinessFunction] = [
         description="Revenue/expense forecasts, variance vs plan, segment P&L, and management reporting packages.",
         icon="file-spreadsheet",
         color="#00B8D9",
-        category="Capital & Performance",
+        category="Treasury & Capital",
         default_views=["P&L vs Plan", "Segment Walk", "Expense Drivers", "Forecast Path"],
         sample_metrics=["Revenue", "OpEx", "PPNR", "Variance"],
     ),
@@ -122,8 +98,7 @@ BUSINESS_FUNCTIONS: list[BusinessFunction] = [
 # Display order for the home page (matches the buckets above)
 CATEGORY_ORDER = [
     "Markets & Risk",
-    "Treasury & Balance Sheet",
-    "Capital & Performance",
+    "Treasury & Capital",
 ]
 
 

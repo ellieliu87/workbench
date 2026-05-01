@@ -47,85 +47,11 @@ _RUNS: dict[str, AnalyticsRun] = {}
 
 
 # ── Built-in scenarios ──────────────────────────────────────────────────────
-BUILTIN_DATA: dict[str, dict[str, Any]] = {
-    "scn-base": {
-        "name": "Base Case",
-        "description": "CCAR Baseline — moderate growth, gradual rate normalization.",
-        "severity": "base",
-        "variables": ["10Y_UST", "2Y_UST", "Unemployment", "GDP", "HPI"],
-        "horizon_months": 12,
-        "paths": {
-            "10Y_UST":      [4.46, 4.42, 4.38, 4.30, 4.22, 4.15, 4.10, 4.05, 4.00, 3.95, 3.92, 3.90],
-            "2Y_UST":       [4.68, 4.55, 4.40, 4.20, 4.00, 3.85, 3.70, 3.55, 3.45, 3.40, 3.35, 3.30],
-            "Unemployment": [3.80, 3.85, 3.90, 3.95, 4.00, 4.05, 4.10, 4.10, 4.10, 4.10, 4.10, 4.10],
-            "GDP":          [2.10, 2.05, 2.00, 1.95, 1.95, 2.00, 2.05, 2.10, 2.15, 2.15, 2.15, 2.15],
-            "HPI":          [3.50, 3.40, 3.30, 3.20, 3.10, 3.00, 2.90, 2.80, 2.75, 2.70, 2.70, 2.70],
-        },
-    },
-    "scn-adverse": {
-        "name": "Adverse",
-        "description": "CCAR Adverse — mild recession, slow disinflation.",
-        "severity": "adverse",
-        "variables": ["10Y_UST", "2Y_UST", "Unemployment", "GDP", "HPI"],
-        "horizon_months": 12,
-        "paths": {
-            "10Y_UST":      [4.46, 4.30, 4.10, 3.85, 3.60, 3.40, 3.25, 3.15, 3.10, 3.10, 3.15, 3.20],
-            "2Y_UST":       [4.68, 4.30, 3.85, 3.40, 3.00, 2.65, 2.40, 2.25, 2.20, 2.20, 2.25, 2.30],
-            "Unemployment": [3.80, 4.10, 4.45, 4.85, 5.30, 5.75, 6.10, 6.30, 6.40, 6.40, 6.30, 6.20],
-            "GDP":          [2.10, 1.50, 0.80, -0.20, -0.90, -1.20, -1.00, -0.50, 0.20, 0.80, 1.20, 1.50],
-            "HPI":          [3.50, 2.20, 0.40, -1.50, -3.00, -4.00, -4.20, -3.80, -3.00, -2.00, -1.00, 0.00],
-        },
-    },
-    "scn-severe": {
-        "name": "Severely Adverse",
-        "description": "CCAR Severely Adverse — deep global recession with sharp asset-price declines.",
-        "severity": "severely_adverse",
-        "variables": ["10Y_UST", "2Y_UST", "Unemployment", "GDP", "HPI"],
-        "horizon_months": 12,
-        "paths": {
-            "10Y_UST":      [4.46, 4.10, 3.65, 3.10, 2.55, 2.10, 1.80, 1.65, 1.60, 1.65, 1.75, 1.85],
-            "2Y_UST":       [4.68, 4.00, 3.20, 2.30, 1.50, 0.85, 0.45, 0.25, 0.20, 0.30, 0.45, 0.65],
-            "Unemployment": [3.80, 4.50, 5.40, 6.50, 7.80, 9.00, 9.80, 10.20, 10.30, 10.10, 9.80, 9.40],
-            "GDP":          [2.10, 0.80, -1.20, -3.50, -5.20, -6.00, -5.20, -3.80, -2.20, -0.80, 0.40, 1.40],
-            "HPI":          [3.50, 0.50, -3.00, -7.00, -10.50, -13.00, -14.00, -13.20, -11.50, -9.00, -6.00, -3.00],
-        },
-    },
-    "scn-outlook": {
-        "name": "Internal Outlook",
-        "description": "Treasury internal outlook — soft landing with sticky inflation.",
-        "severity": "outlook",
-        "variables": ["10Y_UST", "2Y_UST", "Unemployment", "GDP", "HPI"],
-        "horizon_months": 12,
-        "paths": {
-            "10Y_UST":      [4.46, 4.40, 4.32, 4.25, 4.18, 4.12, 4.08, 4.05, 4.02, 4.00, 4.00, 4.00],
-            "2Y_UST":       [4.68, 4.50, 4.30, 4.10, 3.95, 3.80, 3.70, 3.62, 3.58, 3.55, 3.55, 3.55],
-            "Unemployment": [3.80, 3.82, 3.85, 3.90, 3.95, 4.00, 4.05, 4.10, 4.10, 4.10, 4.10, 4.05],
-            "GDP":          [2.10, 2.10, 2.05, 2.00, 2.00, 2.05, 2.10, 2.15, 2.20, 2.25, 2.25, 2.25],
-            "HPI":          [3.50, 3.45, 3.40, 3.35, 3.30, 3.25, 3.25, 3.25, 3.25, 3.25, 3.25, 3.25],
-        },
-    },
-}
-
-
-def _seed_builtins():
-    if _SCENARIOS:
-        return
-    now = datetime.utcnow().isoformat() + "Z"
-    for sid, data in BUILTIN_DATA.items():
-        _SCENARIOS[sid] = Scenario(
-            id=sid,
-            function_id=None,
-            name=data["name"],
-            description=data["description"],
-            severity=data["severity"],
-            source_kind="builtin",
-            variables=data["variables"],
-            horizon_months=data["horizon_months"],
-            created_at=now,
-        )
-
-
-_seed_builtins()
+# Populated at startup by `services.data_services.materialize_into_scenarios_registry`.
+# Each entry mirrors a CCAR or Outlook card on the Data tab → Data Services
+# section, so the Workflow tab's Scenarios palette stays in sync with what
+# the user has visible under Data.
+BUILTIN_DATA: dict[str, dict[str, Any]] = {}
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -213,7 +139,18 @@ def _apply_model(model_id: str, scenario_df: pd.DataFrame) -> tuple[list[dict[st
         }
         return row_results, summary
 
-    # Uploaded / external — fabricate a plausible response from the macro vars
+    # Uploaded artifact — sandboxed prediction via subprocess, then
+    # post-processed per the model's declared output_kind.
+    if m.source_kind == "upload" and m.artifact_path and m.file_format:
+        return _apply_uploaded_model(m, scenario_df)
+
+    # Fallback for everything else (e.g. URI-referenced) — fabricate a
+    # plausible response from the macro vars. Marked clearly in the
+    # summary so the analyst knows the numbers aren't real.
+    return _synthesize_response(m, scenario_df)
+
+
+def _synthesize_response(m, scenario_df: pd.DataFrame) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     rng = np.random.default_rng(hash((m.id, len(scenario_df))) & 0xFFFFFFFF)
     base_signal = scenario_df.select_dtypes(include="number").drop(columns=["month"], errors="ignore")
     if base_signal.shape[1] == 0:
@@ -236,7 +173,7 @@ def _apply_model(model_id: str, scenario_df: pd.DataFrame) -> tuple[list[dict[st
                     pass
         series.append(entry)
     preds = [r["prediction"] for r in series]
-    summary = {
+    return series, {
         "min_prediction": round(min(preds), 4),
         "max_prediction": round(max(preds), 4),
         "mean_prediction": round(float(np.mean(preds)), 4),
@@ -244,7 +181,168 @@ def _apply_model(model_id: str, scenario_df: pd.DataFrame) -> tuple[list[dict[st
         "model_type": m.model_type,
         "note": "Synthesized response for non-in-app model",
     }
+
+
+def _apply_uploaded_model(m, scenario_df: pd.DataFrame) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Run an uploaded artifact in the sandboxed runner and shape the
+    output to the orchestrator's row-per-step format."""
+    from pathlib import Path
+    from services.model_runner import predict as sandbox_predict
+    from routers.models_registry import ARTIFACT_ROOT
+
+    # Build the absolute artifact path. Pack-shipped models use
+    # `attach_model` and store an absolute path; uploaded ones store a
+    # path relative to ARTIFACT_ROOT.
+    artifact_str = str(m.artifact_path)
+    abs_path = Path(artifact_str)
+    if not abs_path.is_absolute():
+        abs_path = ARTIFACT_ROOT / artifact_str
+    if not abs_path.exists():
+        raise HTTPException(status_code=404, detail=f"Model artifact not found at {abs_path}")
+
+    # Resolve declared input feature names. Priority:
+    #   1. feature_mapping keys (model's expected names) — the canonical list.
+    #   2. feature_columns (legacy / regression-shaped models).
+    #   3. (empty) — sandbox falls back to all numeric columns.
+    feature_columns = list(m.feature_mapping.keys()) if m.feature_mapping else list(m.feature_columns or [])
+
+    # Pass the dataset to the sandbox UNCHANGED. The sandbox runs the
+    # pre-transform first (against the user's original CSV column names,
+    # which is what their expression references), THEN applies
+    # feature_mapping renames, THEN extracts feature_columns. Renaming
+    # here would break the user's pre-transform expressions.
+    df_records = scenario_df.to_dict(orient="records")
+
+    result = sandbox_predict(
+        artifact_path=str(abs_path),
+        file_format=m.file_format or "pkl",
+        df_records=df_records,
+        feature_columns=feature_columns,
+        feature_mapping=dict(m.feature_mapping or {}),
+        pre_transform=m.pre_transform,
+        output_kind=m.output_kind or "scalar",
+    )
+
+    if not result.get("ok"):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Sandboxed model prediction failed.",
+                "error": result.get("error"),
+                "stderr": result.get("stderr"),
+                "traceback": result.get("traceback"),
+            },
+        )
+
+    predictions = result["predictions"]
+    return _post_process(predictions, scenario_df, m)
+
+
+def _post_process(predictions, scenario_df: pd.DataFrame, m) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Shape the sandbox's raw predictions into the orchestrator's
+    `[{month, prediction, ...input_cols}]` series format, branching on
+    `output_kind`."""
+    output_kind = m.output_kind or "scalar"
+    series: list[dict[str, Any]] = []
+
+    def _row_passthrough(i: int, row) -> dict[str, Any]:
+        entry: dict[str, Any] = {"month": int(row.get("month", i + 1))}
+        for v in scenario_df.columns:
+            if v == "month":
+                continue
+            try:
+                entry[v] = float(row[v])
+            except (TypeError, ValueError):
+                pass
+        return entry
+
+    if output_kind == "scalar":
+        # predictions: 1-D list, one value per input row.
+        flat = [float(p[0]) if isinstance(p, list) else float(p) for p in predictions]
+        for i, (_, row) in enumerate(scenario_df.iterrows()):
+            entry = _row_passthrough(i, row)
+            entry["prediction"] = float(round(flat[i] if i < len(flat) else 0.0, 6))
+            series.append(entry)
+        summary = _scalar_summary(flat, m)
+
+    elif output_kind == "probability_vector":
+        # predictions: 2-D, shape (rows, classes).
+        labels = m.class_labels or [f"class_{j}" for j in range(len(predictions[0]) if predictions else 0)]
+        for i, (_, row) in enumerate(scenario_df.iterrows()):
+            entry = _row_passthrough(i, row)
+            probs = predictions[i] if i < len(predictions) else [0.0] * len(labels)
+            for j, lbl in enumerate(labels):
+                entry[f"p_{lbl}"] = float(round(float(probs[j]), 6)) if j < len(probs) else 0.0
+            # `prediction` = argmax label, for downstream tiles that want a
+            # single column.
+            try:
+                argmax_idx = max(range(len(probs)), key=lambda k: probs[k])
+                entry["prediction"] = labels[argmax_idx]
+            except ValueError:
+                entry["prediction"] = None
+            series.append(entry)
+        summary = {
+            "model_type": m.model_type,
+            "output_kind": "probability_vector",
+            "classes": labels,
+            "horizon_steps": len(series),
+        }
+
+    elif output_kind == "n_step_forecast":
+        # predictions: a 1-D list of length = forecast_steps. Single input
+        # row produces multiple output rows.
+        flat = [float(p[0]) if isinstance(p, list) else float(p) for p in predictions]
+        steps = m.forecast_steps or len(flat)
+        # Anchor month: the first row's `month` if present, else 1.
+        try:
+            anchor = int(scenario_df.iloc[0].get("month", 0)) if len(scenario_df) else 0
+        except Exception:
+            anchor = 0
+        for j in range(steps):
+            series.append({"month": anchor + j + 1, "step": j + 1,
+                           "prediction": float(round(flat[j] if j < len(flat) else 0.0, 6))})
+        summary = _scalar_summary(flat[:steps], m, extra={"output_kind": "n_step_forecast",
+                                                          "forecast_steps": steps})
+
+    elif output_kind == "multi_target":
+        # predictions: 2-D, shape (rows, targets).
+        targets = m.target_names or [f"target_{j}" for j in range(len(predictions[0]) if predictions else 0)]
+        for i, (_, row) in enumerate(scenario_df.iterrows()):
+            entry = _row_passthrough(i, row)
+            vals = predictions[i] if i < len(predictions) else [0.0] * len(targets)
+            for j, tname in enumerate(targets):
+                entry[tname] = float(round(float(vals[j]), 6)) if j < len(vals) else 0.0
+            # Convention: `prediction` = first target so existing tile UIs
+            # that look for that key still work.
+            entry["prediction"] = entry.get(targets[0]) if targets else None
+            series.append(entry)
+        summary = {
+            "model_type": m.model_type,
+            "output_kind": "multi_target",
+            "targets": targets,
+            "horizon_steps": len(series),
+        }
+
+    else:
+        raise HTTPException(status_code=400, detail=f"Unknown output_kind '{output_kind}'")
+
     return series, summary
+
+
+def _scalar_summary(preds, m, extra: dict | None = None) -> dict[str, Any]:
+    if not preds:
+        out = {"model_type": m.model_type, "horizon_steps": 0, "note": "Empty prediction set"}
+    else:
+        out = {
+            "min_prediction": round(min(preds), 4),
+            "max_prediction": round(max(preds), 4),
+            "mean_prediction": round(float(np.mean(preds)), 4),
+            "horizon_steps": len(preds),
+            "model_type": m.model_type,
+        }
+    if extra:
+        out.update(extra)
+    return out
 
 
 # ── Scenario routes ─────────────────────────────────────────────────────────
@@ -473,8 +571,25 @@ def _resolve_input_frame(
     node: WorkflowNode,
     upstream_outputs: dict[str, list[dict[str, Any]]],
     horizon: int,
+    *,
+    by_id: dict[str, WorkflowNode] | None = None,
+    incoming: dict[str, list[str]] | None = None,
+    scenario_name: str | None = None,
+    start_date: str | None = None,
 ) -> pd.DataFrame:
-    """Turn one upstream node into a DataFrame the consuming model can read."""
+    """Turn one upstream node into a DataFrame the consuming model can read.
+
+    `scenario_name` and `start_date` come from the Workflow tab's run
+    controls. They flow through to Transform nodes as a query context —
+    e.g. when the user picks `Data Harness` and the run is tagged with
+    `BHCS 2026 / 2026-04-01`, the harness output is shaped to that
+    scenario's macro path and re-anchored to the chosen start month.
+
+    `by_id` + `incoming` are passed so transform nodes with upstream
+    edges can recurse on their inputs (e.g. `Data Harness → DQC →
+    Models` — DQC reads the harness's output, runs quality checks,
+    passes through).
+    """
     if node.kind == "dataset":
         df, _, _ = _input_dataframe(scenario_id=None, dataset_id=node.ref_id, horizon=horizon)
         return df
@@ -487,7 +602,296 @@ def _resolve_input_frame(
         if not rows:
             raise HTTPException(status_code=400, detail=f"Model node {node.id} has no upstream output yet")
         return pd.DataFrame(rows)
+    if node.kind == "transform":
+        from routers.transforms import _TRANSFORMS
+        t = _TRANSFORMS.get(node.ref_id)
+        if not t:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Transform '{node.ref_id}' is not registered.",
+            )
+
+        sources = (incoming or {}).get(node.id, [])
+        if sources and by_id:
+            # The transform has upstream nodes wired in — take their
+            # merged frames as the input. Used by DQC ("validate the
+            # harness output before models consume it") and any future
+            # filter/join transforms.
+            upstream_frames = [
+                _resolve_input_frame(
+                    by_id[s], upstream_outputs, horizon,
+                    by_id=by_id, incoming=incoming,
+                    scenario_name=scenario_name, start_date=start_date,
+                )
+                for s in sources
+            ]
+            input_df = _merge_frames(upstream_frames)
+        else:
+            # Source transform — read from its declared output dataset,
+            # honoring any per-node "Read data from" override the user
+            # configured on the canvas inspector. Apply the run-context
+            # overlay (scenario + start_date) so the harness behaves as
+            # if it had queried with those parameters.
+            override = _read_selected_datasets(
+                (node.config or {}).get("read_dataset_ids") or [], horizon,
+            )
+            if override is not None:
+                input_df = override
+            else:
+                if not t.output_dataset_id:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Transform '{t.name}' has no output dataset configured "
+                            "and no upstream input wired. Connect a dataset to its "
+                            "left handle, or set `output_dataset_id` on the pack."
+                        ),
+                    )
+                input_df, _, _ = _input_dataframe(
+                    scenario_id=None, dataset_id=t.output_dataset_id, horizon=horizon,
+                )
+            input_df = _apply_run_context(
+                input_df, scenario_name=scenario_name, start_date=start_date,
+            )
+
+        # Run the transform's recipe — DQC executes its checks; other
+        # transforms pass through (their materialization is the read above).
+        params = {
+            p.name: p.default for p in (t.parameters or [])
+            if p.default is not None
+        }
+        params.update((node.config or {}).get("params") or {})
+        result_df = _execute_transform(t, input_df, params)
+
+        # Validate model feature requirements per the inspector's
+        # "Match requirements of" multi-select. Raises a structured
+        # FEATURE_MISMATCH error if the materialized columns can't
+        # satisfy the selected models.
+        return _apply_node_config(node, result_df)
     raise HTTPException(status_code=400, detail=f"Unknown node kind {node.kind}")
+
+
+def _read_selected_datasets(
+    dataset_ids: list[str],
+    horizon: int,
+) -> pd.DataFrame | None:
+    """Materialize the merged frame for a list of user-selected datasets.
+
+    Used when the analyst overrides a Data Harness's source from the
+    inspector's "Read data from" multi-select. Returns None when the
+    selection is empty — the caller falls back to the static
+    `output_dataset_id`.
+    """
+    if not dataset_ids:
+        return None
+    frames: list[pd.DataFrame] = []
+    for ds_id in dataset_ids:
+        try:
+            df, _, _ = _input_dataframe(
+                scenario_id=None, dataset_id=ds_id, horizon=horizon,
+            )
+            frames.append(df)
+        except HTTPException:
+            # Dataset went away between selection and run — skip rather
+            # than hard-fail; the requirement check below catches the
+            # missing-feature case if the survivors aren't enough.
+            continue
+    if not frames:
+        return None
+    return _merge_frames(frames)
+
+
+def _apply_node_config(node: WorkflowNode, df: pd.DataFrame) -> pd.DataFrame:
+    """Honor the per-node `requirement_model_ids` config — fail the run
+    if the transform's output doesn't carry every feature the selected
+    models need. Surfaces a structured FEATURE_MISMATCH the run-error
+    card already knows how to render.
+    """
+    cfg = node.config or {}
+    required_models = cfg.get("requirement_model_ids") or []
+    if not required_models:
+        return df
+
+    cols_lower = {str(c).lower() for c in df.columns}
+    missing_per_model: dict[str, list[str]] = {}
+    for mid in required_models:
+        m = _MODELS.get(mid)
+        if not m:
+            continue
+        features = list(m.feature_columns or []) or list((m.feature_mapping or {}).keys())
+        missing = [f for f in features if f and f.lower() not in cols_lower]
+        if missing:
+            missing_per_model[m.name] = missing
+    if missing_per_model:
+        first_name = next(iter(missing_per_model))
+        first_missing = missing_per_model[first_name]
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Transform output missing features required by selected models.",
+                "error": (
+                    f"Feature(s) not found in dataset: {first_missing} "
+                    f"(required by `{first_name}`)"
+                    + (f"; +{len(missing_per_model)-1} other model(s)" if len(missing_per_model) > 1 else "")
+                ),
+                "hint": (
+                    "Either pick a different dataset on the harness card, or "
+                    "remove these models from the harness's 'Match requirements "
+                    "of' selection."
+                ),
+            },
+        )
+    return df
+
+
+def _execute_transform(
+    transform, df: pd.DataFrame, params: dict[str, Any],
+) -> pd.DataFrame:
+    """Dispatch a transform's runtime by identity.
+
+    DQC runs row-count + null-rate (and any other declared) checks
+    against the input frame. Other transforms (Data Harness etc.)
+    materialize their output via `output_dataset_id` upstream — by the
+    time we get here, the materialization already happened, so the
+    default is passthrough.
+    """
+    is_dqc = (
+        "dqc" in (transform.id or "").lower()
+        or "DataQualityCheck" in (transform.recipe_python or "")
+    )
+    if is_dqc:
+        return _run_dqc(df, params)
+    return df
+
+
+def _run_dqc(df: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
+    """Run Data Quality Check on the input frame.
+
+    Production path: the corporate `pa_common_tools.DataQualityCheck`
+    class. Outside the proxy environment (or if the class signature
+    doesn't match), a built-in stub runs the same row-count and
+    null-rate checks declared on the transform's parameters. Either
+    path is a passthrough on success and a structured run-error on
+    failure (so the Workflow tab's run-error card renders the
+    `code: DQC_FAILED` message + a hint).
+    """
+    min_rows = int((params or {}).get("min_rows", 12))
+    max_null_rate = float((params or {}).get("max_null_rate", 0.05))
+
+    # ── Production path: the corporate library ────────────────────────
+    try:
+        import importlib
+        importlib.invalidate_caches()
+        mod = importlib.import_module("pa_common_tools")
+        cls = getattr(mod, "DataQualityCheck", None)
+        if cls is not None:
+            checker = cls(min_rows=min_rows, max_null_rate=max_null_rate)
+            run = getattr(checker, "run", None)
+            if callable(run):
+                return run(df)
+            if callable(checker):
+                return checker(df)
+    except ImportError:
+        pass  # pa_common_tools not installed — use the stub
+    except Exception as e:
+        # The library was found but raised — surface that to the user
+        # rather than silently falling back. Keep `DQC_FAILED` so the
+        # frontend run-error card recognizes it.
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Data Quality Check failed.",
+                "error": f"pa_common_tools.DataQualityCheck raised: {e}",
+                "hint": (
+                    "Inspect the failure inside the corporate library, or "
+                    "tighten the harness's parameters to keep the data "
+                    "inside acceptable bands."
+                ),
+            },
+        )
+
+    # ── Built-in stub (matches the recipe text on the inspector) ──────
+    if len(df) < min_rows:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Data Quality Check failed: too few rows.",
+                "error": f"DQC: only {len(df)} row(s); need at least {min_rows}.",
+                "hint": (
+                    f"Lower the `min_rows` threshold on the DQC card "
+                    f"(currently {min_rows}), or extend the harness horizon "
+                    "so it materializes more rows."
+                ),
+            },
+        )
+
+    null_rates = df.isna().mean()
+    worst_null = float(null_rates.max()) if len(null_rates) else 0.0
+    if worst_null > max_null_rate:
+        worst_col = str(null_rates.idxmax())
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Data Quality Check failed: column null rate too high.",
+                "error": (
+                    f"DQC: column `{worst_col}` is {worst_null:.1%} null "
+                    f"(max allowed {max_null_rate:.1%})."
+                ),
+                "hint": (
+                    "Filter null rows out upstream, or relax `max_null_rate` "
+                    f"on the DQC card (currently {max_null_rate:.1%})."
+                ),
+            },
+        )
+
+    return df
+
+
+def _apply_run_context(
+    df: pd.DataFrame,
+    *,
+    scenario_name: str | None,
+    start_date: str | None,
+) -> pd.DataFrame:
+    """Overlay the selected scenario's macro path + re-anchor the
+    as_of_date column on a transform's materialized output.
+
+    In a real corporate deploy the Data Harness would use these to
+    query OneLake with the right scenario filter and start month. For
+    the demo we approximate by overwriting the rate / unemployment / GDP
+    / HPI columns from the matched scenario's synthetic path, leaving
+    every other column (deposit-pricing, accounts, segment-specific)
+    intact. Models downstream see different rate paths per scenario.
+    """
+    if not scenario_name and not start_date:
+        return df
+
+    out = df.copy()
+
+    # ── Overlay macro paths from the matched scenario ──────────────────
+    if scenario_name:
+        match = next(
+            (s for s in _SCENARIOS.values() if s.name == scenario_name),
+            None,
+        )
+        if match and match.id in BUILTIN_DATA:
+            paths = BUILTIN_DATA[match.id].get("paths") or {}
+            n_rows = len(out)
+            for col, values in paths.items():
+                if col in out.columns and len(values) >= n_rows:
+                    out[col] = list(values[:n_rows])
+
+    # ── Re-anchor as_of_date to the picked start_date ──────────────────
+    if start_date and "as_of_date" in out.columns:
+        try:
+            anchor = pd.Timestamp(start_date).to_period("M").to_timestamp()
+            new_dates = pd.date_range(anchor, periods=len(out), freq="MS")
+            out["as_of_date"] = [d.strftime("%Y-%m-%d") for d in new_dates]
+        except Exception:
+            # Bad date string — leave the column alone rather than crashing the run.
+            pass
+
+    return out
 
 
 def _merge_frames(frames: list[pd.DataFrame]) -> pd.DataFrame:
@@ -571,6 +975,139 @@ def _write_destination(
     )
 
 
+def _write_csv_combined(
+    dest_node: WorkflowNode,
+    upstream_runs: list[AnalyticsRun],
+) -> DestinationWrite:
+    """Coalesce N model runs into ONE long-format CSV with a `segment` column.
+
+    Used when a CSV destination has multiple incoming model edges — the
+    classic "fan-in" shape. Each upstream model contributes its rows
+    prepended with `segment=<model name>` so the analyst gets one tidy
+    table for downstream BI."""
+    cfg = dest_node.config or {}
+    filename = cfg.get("filename") or f"{dest_node.id}-combined.csv"
+    combined: list[dict[str, Any]] = []
+    for run in upstream_runs:
+        m = _MODELS.get(run.model_id)
+        seg = m.name if m else run.model_id
+        for row in run.series:
+            combined.append({"segment": seg, **row})
+    return DestinationWrite(
+        node_id=dest_node.id, kind="csv", target=filename,
+        # `upstream_model_id` / `upstream_run_id` are scalar fields on the
+        # schema — pin to the first run; the merged note records the rest.
+        upstream_model_id=upstream_runs[0].model_id,
+        upstream_run_id=upstream_runs[0].id,
+        rows_written=len(combined), status="written",
+        csv_filename=filename, csv_data=combined,
+        note=f"Combined CSV across {len(upstream_runs)} upstream models (segment column added)",
+    )
+
+
+# ── Run-time error classification ──────────────────────────────────────────
+# Maps a raw failure message from the sandbox / model loader to a user-facing
+# {code, what_happened, how_to_fix} triple. The Run-failed card in the UI
+# renders these fields directly. New patterns slot in by adding another
+# (substring, code, hint) row.
+_RUN_ERROR_PATTERNS: list[tuple[str, str, str]] = [
+    (
+        "DQC:",
+        "DQC_FAILED",
+        "Inspect the failing column on the harness output, or relax the DQC card's "
+        "thresholds (min_rows / max_null_rate).",
+    ),
+    (
+        "Feature(s) not found in dataset",
+        "FEATURE_MISMATCH",
+        "Rename the dataset's columns to match the model's expected feature names, "
+        "or pick a different dataset. The match is case-insensitive.",
+    ),
+    (
+        "timed out after",
+        "TIMEOUT",
+        "The prediction subprocess hit its wall-clock limit. Try a smaller horizon "
+        "or upload a faster model.",
+    ),
+    (
+        "Model artifact not found",
+        "ARTIFACT_MISSING",
+        "The model's file is missing on disk. Re-upload it from the Models tab.",
+    ),
+    (
+        "pre_transform failed",
+        "PRE_TRANSFORM",
+        "The model's pre-transform expression raised. Open the model in the Models "
+        "tab and fix the expression — it runs in the sandbox before feature extraction.",
+    ),
+    (
+        "Unsupported model format",
+        "UNSUPPORTED_FORMAT",
+        "Only .pkl, .joblib, and .onnx are supported. Re-export the model in one of those formats.",
+    ),
+    (
+        "exited without producing output",
+        "SUBPROCESS_DIED",
+        "The prediction subprocess crashed (segfault, OOM, or import-time error). "
+        "Check that the .pkl was exported from the same Python/sklearn version as the runtime.",
+    ),
+    (
+        "Can't get attribute",
+        "PICKLE_CLASS_MISSING",
+        "The pickle references a class that wasn't found at load time. If the model uses a "
+        "custom class, ship its .py module alongside the artifact (a sibling `_classname.py`).",
+    ),
+    (
+        "No module named",
+        "PICKLE_MODULE_MISSING",
+        "A module the pickle imports isn't installed in the backend. Either bake it into "
+        "the artifact or add the dependency.",
+    ),
+    (
+        "Could not parse model output",
+        "OUTPUT_PARSE",
+        "The sandbox produced output the orchestrator can't read. Check the model returns "
+        "a list/array of numbers, not a custom object.",
+    ),
+    (
+        "is expecting",  # sklearn: "X has N features, but ... is expecting M features"
+        "OUTPUT_SHAPE",
+        "The model received a different number of features than it was trained on. "
+        "Check the dataset has exactly the columns the model expects.",
+    ),
+]
+
+
+def _classify_run_error(raw: Any) -> dict[str, Any]:
+    """Turn the orchestrator's raw failure (str / dict / Exception) into a
+    structured error_detail the UI can render directly."""
+    if isinstance(raw, dict):
+        msg = (
+            raw.get("error")
+            or raw.get("message")
+            or raw.get("detail")
+            or str(raw)
+        )
+    else:
+        msg = str(raw) if raw is not None else "Unknown error"
+    msg_str = str(msg)
+    for needle, code, hint in _RUN_ERROR_PATTERNS:
+        if needle in msg_str:
+            return {
+                "code": code,
+                "what_happened": msg_str,
+                "how_to_fix": hint,
+            }
+    return {
+        "code": "GENERIC",
+        "what_happened": msg_str,
+        "how_to_fix": (
+            "Inspect the failed step's run details below, or ask the troubleshooter "
+            "agent for help."
+        ),
+    }
+
+
 @router.post("/workflow-runs", response_model=WorkflowResult, status_code=201)
 async def create_workflow_run(req: WorkflowRequest, _: str = Depends(get_current_user)):
     started = datetime.utcnow()
@@ -600,25 +1137,41 @@ async def create_workflow_run(req: WorkflowRequest, _: str = Depends(get_current
     step_idx = 0
 
     for node in ordered:
-        if node.kind in ("dataset", "scenario"):
+        if node.kind in ("dataset", "scenario", "transform"):
+            # Inputs and ETL transforms are passive in v1 — the orchestrator
+            # resolves them on demand inside `_resolve_input_frame`. Mark
+            # them green so the canvas reflects the run shape.
             node_status[node.id] = "completed"
             continue
 
         if node.kind == "destination":
-            # Find the upstream model that feeds this destination
+            # Find the upstream model(s) feeding this destination.
             sources = incoming.get(node.id, [])
             if not sources:
                 node_status[node.id] = "skipped"
                 continue
-            wrote_any = False
-            for src in sources:
-                src_run = model_runs_by_node.get(src)
-                if not src_run or src_run.status != "completed":
-                    continue
-                dw = _write_destination(node, src_run)
+            completed_runs = [
+                model_runs_by_node[s]
+                for s in sources
+                if model_runs_by_node.get(s) and model_runs_by_node[s].status == "completed"
+            ]
+            if not completed_runs:
+                node_status[node.id] = "skipped"
+                continue
+            # CSV with multiple inputs → fan-in into one long-format file
+            # with a `segment` column. Other kinds (Snowflake/OneLake/S3)
+            # keep their per-source semantics.
+            if node.ref_id == "csv" and len(completed_runs) > 1:
+                dw = _write_csv_combined(node, completed_runs)
                 destinations.append(dw)
-                wrote_any = wrote_any or dw.status == "written"
-            node_status[node.id] = "completed" if wrote_any else "skipped"
+                node_status[node.id] = "completed" if dw.status == "written" else "skipped"
+            else:
+                wrote_any = False
+                for src_run in completed_runs:
+                    dw = _write_destination(node, src_run)
+                    destinations.append(dw)
+                    wrote_any = wrote_any or dw.status == "written"
+                node_status[node.id] = "completed" if wrote_any else "skipped"
             continue
 
         # node.kind == 'model'
@@ -629,27 +1182,82 @@ async def create_workflow_run(req: WorkflowRequest, _: str = Depends(get_current
                 detail=f"Model node '{node.id}' has no input — connect a dataset, scenario, or upstream model.",
             )
 
-        frames = [_resolve_input_frame(by_id[s], outputs, req.horizon_months) for s in sources]
-        merged = _merge_frames(frames)
-        if "month" in merged.columns:
-            merged = merged[merged["month"] <= req.horizon_months]
-        else:
-            merged = merged.head(req.horizon_months)
-
         m = _MODELS.get(node.ref_id)
         if not m:
             raise HTTPException(status_code=404, detail=f"Model {node.ref_id} not found")
 
         run_started = datetime.utcnow()
+        failed_detail: dict[str, Any] | None = None
+        run_status_lit: str
+        run_error: str | None
+        series: list[dict[str, Any]]
+        summary: dict[str, Any]
+
+        # Wrap input resolution AND the model call in the same try/except
+        # so failures upstream (DQC tripping, transform config rejecting
+        # the data, missing dataset) get classified into a structured
+        # error_detail on the WorkflowResult, rather than escaping as a
+        # raw HTTP error from the endpoint.
         try:
+            frames = [
+                _resolve_input_frame(
+                    by_id[s], outputs, req.horizon_months,
+                    by_id=by_id,
+                    incoming=incoming,
+                    scenario_name=req.scenario_name,
+                    start_date=req.start_date,
+                )
+                for s in sources
+            ]
+            merged = _merge_frames(frames)
+            if "month" in merged.columns:
+                merged = merged[merged["month"] <= req.horizon_months]
+            else:
+                merged = merged.head(req.horizon_months)
+
             series, summary = _apply_model(node.ref_id, merged)
             run_status_lit = "completed"
             run_error = None
+        except HTTPException as e:
+            raw = e.detail if isinstance(e.detail, dict) else {"message": str(e.detail)}
+            classified = _classify_run_error(raw)
+            failed_detail = {
+                **classified,
+                "node_id": node.id,
+                "node_label": m.name,
+                "step_index": step_idx + 1,
+                "raw": raw,
+            }
+            series, summary, run_status_lit = [], {}, "failed"
+            run_error = classified["what_happened"]
         except Exception as e:
-            series, summary, run_status_lit, run_error = [], {}, "failed", str(e)
+            classified = _classify_run_error(str(e))
+            failed_detail = {
+                **classified,
+                "node_id": node.id,
+                "node_label": m.name,
+                "step_index": step_idx + 1,
+                "raw": {"message": str(e)},
+            }
+            series, summary, run_status_lit = [], {}, "failed"
+            run_error = classified["what_happened"]
 
         rid = f"run-{uuid.uuid4().hex[:10]}"
         m.last_run = run_started.isoformat() + "Z"
+        # Stitch the run-context (scenario, start_date) into `notes` so
+        # the run-history panel shows them inline. Storing them as
+        # first-class fields would require schema + UI surface area we
+        # don't need yet.
+        ctx_bits = []
+        if req.scenario_name:
+            ctx_bits.append(f"scenario: {req.scenario_name}")
+        if req.start_date:
+            ctx_bits.append(f"start: {req.start_date}")
+        ctx_prefix = " · ".join(ctx_bits)
+        merged_notes = (
+            f"[{ctx_prefix}] {req.notes}" if ctx_prefix and req.notes
+            else (f"[{ctx_prefix}]" if ctx_prefix else req.notes)
+        )
         run = AnalyticsRun(
             id=rid,
             function_id=req.function_id,
@@ -663,7 +1271,7 @@ async def create_workflow_run(req: WorkflowRequest, _: str = Depends(get_current
             status=run_status_lit,  # type: ignore[arg-type]
             summary=summary,
             series=series,
-            notes=req.notes,
+            notes=merged_notes,
             error=run_error,
             created_at=run_started.isoformat() + "Z",
             duration_ms=(datetime.utcnow() - run_started).total_seconds() * 1000,
@@ -683,6 +1291,7 @@ async def create_workflow_run(req: WorkflowRequest, _: str = Depends(get_current
                 destinations=destinations,
                 node_status=node_status,  # type: ignore[arg-type]
                 error=run_error,
+                error_detail=failed_detail,
                 duration_ms=(datetime.utcnow() - started).total_seconds() * 1000,
             )
 
