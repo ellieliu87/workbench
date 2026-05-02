@@ -762,6 +762,51 @@ class DestinationWrite(BaseModel):
     csv_data: list[dict[str, Any]] | None = None
 
 
+# ── Saved workflows (named graphs persisted across sessions) ───────────────
+class SavedWorkflow(BaseModel):
+    """A workflow the analyst saved by name. Stores everything the canvas
+    needs to reconstruct the graph + run controls — nodes (with their
+    canvas positions + per-node config), edges, the horizon, the chosen
+    scenario, and the start date."""
+    id: str
+    function_id: str
+    name: str
+    description: str | None = None
+    nodes: list[dict[str, Any]]   # opaque pass-through — frontend node shape
+    edges: list[dict[str, Any]]   # opaque pass-through — frontend edge shape
+    horizon_months: int = 12
+    scenario_name: str | None = None
+    start_date: str | None = None
+    view: Literal["steps", "canvas", "spec"] = "canvas"
+    created_at: str
+    updated_at: str | None = None
+
+
+class SavedWorkflowSummary(BaseModel):
+    """Lightweight projection used by the Workflow tab's Saved-Workflows
+    dropdown — no nodes/edges payload, just enough to render the row."""
+    id: str
+    function_id: str
+    name: str
+    description: str | None = None
+    node_count: int
+    edge_count: int
+    created_at: str
+    updated_at: str | None = None
+
+
+class SavedWorkflowCreate(BaseModel):
+    function_id: str
+    name: str
+    description: str | None = None
+    nodes: list[dict[str, Any]] = Field(default_factory=list)
+    edges: list[dict[str, Any]] = Field(default_factory=list)
+    horizon_months: int = 12
+    scenario_name: str | None = None
+    start_date: str | None = None
+    view: Literal["steps", "canvas", "spec"] = "canvas"
+
+
 class WorkflowResult(BaseModel):
     workflow_id: str
     status: Literal["completed", "failed", "partial"]

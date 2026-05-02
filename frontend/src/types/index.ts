@@ -343,6 +343,33 @@ export interface WorkflowResult {
   duration_ms: number
 }
 
+// ── Saved workflows (named graphs persisted server-side) ────────────────
+export interface SavedWorkflow {
+  id: string
+  function_id: string
+  name: string
+  description?: string | null
+  nodes: any[]                 // opaque ReactFlow node payload
+  edges: any[]                 // opaque ReactFlow edge payload
+  horizon_months: number
+  scenario_name?: string | null
+  start_date?: string | null
+  view: 'steps' | 'canvas' | 'spec'
+  created_at: string
+  updated_at?: string | null
+}
+
+export interface SavedWorkflowSummary {
+  id: string
+  function_id: string
+  name: string
+  description?: string | null
+  node_count: number
+  edge_count: number
+  created_at: string
+  updated_at?: string | null
+}
+
 export interface ToolParameter {
   name: string
   type: 'string' | 'number' | 'integer' | 'boolean' | 'object' | 'array'

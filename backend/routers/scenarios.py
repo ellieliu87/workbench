@@ -26,6 +26,9 @@ from models.schemas import (
     AnalyticsRun,
     DestinationWrite,
     RunRequest,
+    SavedWorkflow,
+    SavedWorkflowCreate,
+    SavedWorkflowSummary,
     Scenario,
     ScenarioCreateFromDataset,
     WorkflowEdge,
@@ -44,6 +47,7 @@ router = APIRouter()
 
 _SCENARIOS: dict[str, Scenario] = {}
 _RUNS: dict[str, AnalyticsRun] = {}
+_SAVED_WORKFLOWS: dict[str, SavedWorkflow] = {}
 
 
 # ── Built-in scenarios ──────────────────────────────────────────────────────
@@ -1106,6 +1110,95 @@ def _classify_run_error(raw: Any) -> dict[str, Any]:
             "agent for help."
         ),
     }
+
+
+# ── Saved workflows (named graphs the analyst saves + restores) ───────────
+def _summarize_saved(w: SavedWorkflow) -> SavedWorkflowSummary:
+    return SavedWorkflowSummary(
+        id=w.id,
+        function_id=w.function_id,
+        name=w.name,
+        description=w.description,
+        node_count=len(w.nodes),
+        edge_count=len(w.edges),
+        created_at=w.created_at,
+        updated_at=w.updated_at,
+    )
+
+
+@router.get("/workflows", response_model=list[SavedWorkflowSummary])
+async def list_saved_workflows(
+    function_id: str | None = Query(default=None),
+    _: str = Depends(get_current_user),
+):
+    items = list(_SAVED_WORKFLOWS.values())
+    if function_id:
+        items = [w for w in items if w.function_id == function_id]
+    items.sort(key=lambda w: w.updated_at or w.created_at, reverse=True)
+    return [_summarize_saved(w) for w in items]
+
+
+@router.get("/workflows/{workflow_id}", response_model=SavedWorkflow)
+async def get_saved_workflow(workflow_id: str, _: str = Depends(get_current_user)):
+    w = _SAVED_WORKFLOWS.get(workflow_id)
+    if not w:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    return w
+
+
+@router.post("/workflows", response_model=SavedWorkflow, status_code=201)
+async def save_workflow(req: SavedWorkflowCreate, _: str = Depends(get_current_user)):
+    wid = f"sw-{uuid.uuid4().hex[:10]}"
+    now = datetime.utcnow().isoformat() + "Z"
+    w = SavedWorkflow(
+        id=wid,
+        function_id=req.function_id,
+        name=req.name,
+        description=req.description,
+        nodes=req.nodes,
+        edges=req.edges,
+        horizon_months=req.horizon_months,
+        scenario_name=req.scenario_name,
+        start_date=req.start_date,
+        view=req.view,
+        created_at=now,
+    )
+    _SAVED_WORKFLOWS[wid] = w
+    return w
+
+
+@router.put("/workflows/{workflow_id}", response_model=SavedWorkflow)
+async def update_saved_workflow(
+    workflow_id: str,
+    req: SavedWorkflowCreate,
+    _: str = Depends(get_current_user),
+):
+    existing = _SAVED_WORKFLOWS.get(workflow_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    now = datetime.utcnow().isoformat() + "Z"
+    updated = SavedWorkflow(
+        id=workflow_id,
+        function_id=req.function_id,
+        name=req.name,
+        description=req.description,
+        nodes=req.nodes,
+        edges=req.edges,
+        horizon_months=req.horizon_months,
+        scenario_name=req.scenario_name,
+        start_date=req.start_date,
+        view=req.view,
+        created_at=existing.created_at,
+        updated_at=now,
+    )
+    _SAVED_WORKFLOWS[workflow_id] = updated
+    return updated
+
+
+@router.delete("/workflows/{workflow_id}", status_code=204)
+async def delete_saved_workflow(workflow_id: str, _: str = Depends(get_current_user)):
+    _SAVED_WORKFLOWS.pop(workflow_id, None)
+    return None
 
 
 @router.post("/workflow-runs", response_model=WorkflowResult, status_code=201)

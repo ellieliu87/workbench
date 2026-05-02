@@ -4,13 +4,16 @@ This document covers two things:
 
 1. **How the workflow orchestrator works** end-to-end — the journey from
    "user clicks Run Workflow" to "rows download as a CSV", with code
-   references at every step.
+   references at every step. Includes the canvas's draft persistence,
+   the saved-workflow CRUD that backs Save / Load / Delete, and the
+   model→model fan-in pattern (RDMaaS / CommMaaS / SBBMaaS → NII
+   Calculator).
 
 2. **What to wire up in the corporate proxy environment** so that the
    demo's static fallbacks are replaced with live data: the OneLake
    extractor for the macro-scenario dataset + CCAR/Outlook scenarios,
-   and `pa-common-tools` for the Data Harness ETL and Data Quality
-   Check.
+   `pa-common-tools` for the Data Harness ETL and Data Quality Check,
+   and the CCAR data file shape your extractor should produce.
 
 ---
 
@@ -84,7 +87,13 @@ recursive resolver. Per node kind:
   For materialized CCAR + Outlook scenarios this dict is populated at
   startup by `services.data_services.materialize_into_scenarios_registry`.
 - **`model`**: returns `pd.DataFrame(upstream_outputs[node.id])` — the
-  prior step's output cached by id.
+  prior step's output cached by id. This is what powers **model →
+  model fan-in** (e.g. `RDMaaS / CommMaaS / SBBMaaS → NII Calculator`).
+  Each MaaS emits **segment-prefixed columns** (`rdmaas_rate_pct`,
+  `rdmaas_balance_mm`, `commmaas_*`, `sbbmaas_*`) so when the three
+  frames merge into the NII Calculator's input, the columns don't
+  collide and the calculator's `feature_names` resolves all six rate
+  + balance columns from one wide row per month.
 - **`transform`**:
   1. If the transform has incoming edges (e.g. *Data Harness → DQC*),
      resolve each upstream recursively and merge them.
@@ -186,6 +195,45 @@ one-line user-facing hint. The result is attached to the
 — the same checks that catch a missing input or a model-feature
 mismatch *before* the run, surfacing them in the canvas's Validate
 panel. Used by the Validate button on the Workflow tab.
+
+### Saved workflows + draft persistence
+
+The Workflow tab has two independent persistence layers — one for the
+in-progress canvas, one for named saves the analyst chooses to keep.
+
+**1. In-progress draft (frontend, automatic).** AnalyticsTab serializes
+the canvas state — nodes, edges, horizon, scenario name, start date,
+view mode, plus the loaded saved-workflow id — to
+`localStorage["cma:workflow:draft:<function_id>"]` on every change.
+On mount it reads back from the same key, so a tab switch (which
+unmounts the component) or a hard reload restores exactly what the
+user was looking at. The Clear button explicitly removes the entry so
+"start fresh" actually starts fresh.
+
+**2. Named saves (backend CRUD).** A separate registry of analyst-named
+workflows. Endpoints under `/api/analytics/workflows`:
+
+| Verb     | Path                                | Purpose                          |
+|----------|-------------------------------------|----------------------------------|
+| `GET`    | `/api/analytics/workflows`          | List summaries (filter by `function_id`) |
+| `GET`    | `/api/analytics/workflows/{id}`     | Full record (nodes + edges + run config) |
+| `POST`   | `/api/analytics/workflows`          | Save a new record                |
+| `PUT`    | `/api/analytics/workflows/{id}`     | Update an existing record        |
+| `DELETE` | `/api/analytics/workflows/{id}`     | Delete                           |
+
+Storage is in-memory (`_SAVED_WORKFLOWS` dict in
+[`scenarios.py`](../backend/routers/scenarios.py)), consistent with
+the rest of the demo — survives until backend restart. Schemas:
+[`SavedWorkflow`](../backend/models/schemas.py),
+[`SavedWorkflowCreate`](../backend/models/schemas.py),
+[`SavedWorkflowSummary`](../backend/models/schemas.py).
+
+The Save / Load / Delete UI in the Workflow run controls (a Bookmark
+icon dropdown) drives all four endpoints. Loading replaces the canvas
+state in one shot; the loaded record id is held in component state so
+subsequent **Save** clicks `PUT`-update in place. **Save as…** forces a
+new record. **Clear** detaches from the loaded record so the next save
+creates a new one.
 
 ---
 
@@ -433,7 +481,57 @@ The Data tab's *Data Services* section badges (`static` / `live ·
 pa_common_tools` / `live · onelake` / `<integration> · fallback`)
 mirror this state at a glance.
 
-### 2.6 Order of operations in the proxy env
+### 2.6 The CCAR scenario data files
+
+In addition to the *Macro scenario* dataset (which feeds the Data
+Harness ETL), the deposits pack ships two CCAR-specific data files
+under `sample_data/ccar/`. These power the Reporting tab's CCAR
+comparison tiles and serve as the data shape your OneLake CCAR table
+should produce.
+
+**`ccar_scenarios.csv`** — wide format, 20 rows × 51 columns.
+
+| Column                 | Type   | Notes                                       |
+|------------------------|--------|---------------------------------------------|
+| `cycle`                | string | `CCAR25` (start Q4-2024) or `CCAR26` (start Q4-2025) |
+| `pq`                   | string | `PQ0`..`PQ9` — 10 quarters per cycle        |
+| `period`               | string | calendar quarter label, e.g. `2024Q4`       |
+| `<scenario>_<macro>`   | float  | for each (BHCB / BHCS / FedB / FedSA) × 12 macros |
+
+The 12 macros: `unemployment_rate_pct`, `employment_growth_yoy_pct`,
+`hpi_yoy_pct`, `cre_price_yoy_pct`, `gdp_qoq_annl_pct`, `m2_billions`,
+`oil_price_usd_bbl`, `fed_funds_pct`, `ust_1y_pct`, `ust_10y_pct`,
+`bbb_spread_bps`, plus `m2_to_gdp_ratio` (precomputed, since the plot
+tile machinery has no run-time arithmetic).
+
+The wide format is required by the chart renderer — multi-line plots
+come from multiple `y_fields`, not from a `group_by`. Two-line BHCB-vs-BHCS
+plots use `y_fields=["bhcb_<x>", "bhcs_<x>"]`; the `style.palette`
+field on each tile pins the order: `["#1E3A8A", "#DC2626"]` — dark
+blue for BHCB, red for BHCS.
+
+**`ccar_peak_summary.csv`** — long format, 9 rows × 5 columns. One row
+per macro variable; columns are `macro`, `bhcb_25`, `bhcb_26`,
+`bhcs_25`, `bhcs_26`. Each cell is the **worst-case (peak) value** of
+that macro over PQ0–PQ9 — `max` for unemployment + BBB spread, `min`
+for everything else (rate troughs, GDP trough, HPI/CRE/oil declines,
+employment contraction). M2 and 1-year UST are intentionally excluded
+per the comparison-table spec.
+
+Both files are regenerated by `python sample_data/ccar/generate.py`.
+The trajectories are deterministic shape functions per scenario type
+(BHCB/FedB = mild expansion glide, BHCS = recession with V-trough at
+PQ3-5, FedSA = deep recession + ZLB rates), anchored to plausible
+Q4-2024 / Q4-2025 starting values so the cycle anchor is visible at PQ0.
+
+When OneLake is enabled, the CCAR table your extractor returns can
+have either layout — long format with one row per (year, scenario,
+pq, macro) is the natural OneLake shape, but the workbench currently
+expects the wide CSV at the dataset path. The cleanest production
+path: have the OneLake refresh hook (section 2.2) pivot the long-form
+extractor result to wide format before writing the CSV.
+
+### 2.7 Order of operations in the proxy env
 
 The minimum viable rollout:
 
@@ -469,10 +567,17 @@ loader — every integration point is a single function in
 | DQC executor                      | `backend/routers/scenarios.py: _run_dqc`                        |
 | Run-error classifier              | `backend/routers/scenarios.py: _classify_run_error`             |
 | Combined-CSV destination          | `backend/routers/scenarios.py: _write_csv_combined`             |
+| Saved-workflow CRUD               | `backend/routers/scenarios.py: list_saved_workflows / get_saved_workflow / save_workflow / update_saved_workflow / delete_saved_workflow` |
+| Saved-workflow schemas            | `backend/models/schemas.py: SavedWorkflow / SavedWorkflowCreate / SavedWorkflowSummary` |
 | Sandboxed model runner            | `backend/services/model_runner.py`                              |
 | OneLake extractor stub            | `backend/services/data_services.py: _onelake_read_table`        |
 | Scenario materialization hook     | `backend/services/data_services.py: materialize_into_scenarios_registry` |
 | Data Services REST                | `backend/routers/data_services.py`                              |
 | Validator                         | `backend/routers/chat_validation.py`                            |
+| CCAR scenario data + generator    | `sample_data/ccar/ccar_scenarios.csv`, `sample_data/ccar/ccar_peak_summary.csv`, `sample_data/ccar/generate.py` |
+| Deposit-suite model classes       | `sample_models/deposits/_classes.py` (RDMaaS / CommMaaS / SBBMaaS / NIICalculator) |
+| Pack registration                 | `backend/packs/deposits/pack.py`                                |
 | Frontend Workflow tab             | `frontend/src/pages/Workspace/AnalyticsTab.tsx`                 |
+| Frontend Saved Workflows menu     | `frontend/src/pages/Workspace/AnalyticsTab.tsx: SavedWorkflowsMenu` |
+| Frontend draft localStorage key   | `cma:workflow:draft:<function_id>`                              |
 | Frontend Data Services section    | `frontend/src/pages/Workspace/DataServicesSection.tsx`          |

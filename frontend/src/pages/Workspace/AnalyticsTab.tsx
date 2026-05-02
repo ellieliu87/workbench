@@ -12,7 +12,7 @@ import {
   FlaskConical, Play, X, Sparkles, Trash2, ChevronRight, AlertCircle,
   CheckCircle2, Database, Boxes, GripVertical, Hand, Layers,
   Snowflake, Cloud, HardDrive, FileText, Settings as SettingsIcon, Download,
-  Loader2, Workflow as WorkflowIcon,
+  Loader2, Workflow as WorkflowIcon, Save, Bookmark,
 } from 'lucide-react'
 import api from '@/lib/api'
 import { useChatStore } from '@/store/chatStore'
@@ -20,6 +20,7 @@ import type {
   AnalyticsRun, Scenario, TrainedModel, Dataset, WorkflowResult,
   DestinationKind, DestinationWrite, NodeRunStatus, WorkflowValidationResult,
   WorkflowValidationIssue, WorkflowRunErrorDetail, Transform, DataSource,
+  SavedWorkflow, SavedWorkflowSummary,
 } from '@/types'
 import {
   ResponsiveContainer, LineChart, Line, CartesianGrid, XAxis, YAxis,
@@ -119,24 +120,42 @@ function AnalyticsCanvas({ functionId, functionName, onAskAgent, onContextChange
   const [activeRun, setActiveRun] = useState<AnalyticsRun | null>(null)
   const [transformPanelFor, setTransformPanelFor] = useState<string | null>(null)
 
-  // Workflow state
-  const [nodes, setNodes] = useState<RFNode<NodeData>[]>([])
-  const [edges, setEdges] = useState<Edge[]>([])
-  const [horizon, setHorizon] = useState(12)
+  // Workflow state — initialized lazily from localStorage so a tab
+  // switch (which unmounts AnalyticsTab) or a page reload doesn't lose
+  // the user's in-progress canvas. Keyed by function_id.
+  const STORAGE_KEY = `cma:workflow:draft:${functionId}`
+  const draft = (() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY)
+      return raw ? JSON.parse(raw) : null
+    } catch { return null }
+  })()
+  const [nodes, setNodes] = useState<RFNode<NodeData>[]>(() => draft?.nodes || [])
+  const [edges, setEdges] = useState<Edge[]>(() => draft?.edges || [])
+  const [horizon, setHorizon] = useState<number>(() =>
+    typeof draft?.horizon === 'number' ? draft.horizon : 12
+  )
   const [running, setRunning] = useState(false)
   const [error, setError] = useState<string | null>(null)
   // Run-context inputs — pinned alongside Horizon. Scenario dropdown
   // sources from the same /api/analytics/scenarios fetch the canvas
   // palette uses, so it stays in sync with Data Services.
-  const [scenarioName, setScenarioName] = useState<string>('')
-  const [startDate, setStartDate] = useState<string>('')
+  const [scenarioName, setScenarioName] = useState<string>(() => draft?.scenarioName || '')
+  const [startDate, setStartDate] = useState<string>(() => draft?.startDate || '')
   const [validation, setValidation] = useState<WorkflowValidationResult | null>(null)
   const [validating, setValidating] = useState(false)
   const [runError, setRunError] = useState<WorkflowRunErrorDetail | null>(null)
   const [latestWorkflowId, setLatestWorkflowId] = useState<string | null>(null)
   const [lastResult, setLastResult] = useState<WorkflowResult | null>(null)
   const [destConfigFor, setDestConfigFor] = useState<{ nodeId: string; kind: DestinationKind } | null>(null)
-  const [view, setView] = useState<WorkflowView>('steps')
+  const [view, setView] = useState<WorkflowView>(() => draft?.view || 'steps')
+
+  // Saved-workflow registry (server-side) + the currently loaded record
+  // (so Save can update-in-place rather than always create a new one).
+  const [savedWorkflows, setSavedWorkflows] = useState<SavedWorkflowSummary[]>([])
+  const [activeSavedId, setActiveSavedId] = useState<string | null>(() => draft?.activeSavedId || null)
+  const [activeSavedName, setActiveSavedName] = useState<string | null>(() => draft?.activeSavedName || null)
+  const [savedMenuOpen, setSavedMenuOpen] = useState(false)
 
   const flowRef = useRef<HTMLDivElement>(null)
   const { screenToFlowPosition } = useReactFlow()
@@ -155,6 +174,28 @@ function AnalyticsCanvas({ functionId, functionName, onAskAgent, onContextChange
     })
   }
   useEffect(load, [functionId])
+
+  // Saved-workflow list — refreshed independently so Save / Delete
+  // updates the dropdown without re-fetching everything.
+  const loadSavedWorkflows = useCallback(() => {
+    api.get<SavedWorkflowSummary[]>('/api/analytics/workflows', {
+      params: { function_id: functionId },
+    })
+      .then((r) => setSavedWorkflows(r.data))
+      .catch(() => setSavedWorkflows([]))
+  }, [functionId])
+  useEffect(loadSavedWorkflows, [loadSavedWorkflows])
+
+  // Persist the in-progress canvas to localStorage on every change so
+  // tab switches + page reloads keep what the user built.
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({
+        nodes, edges, horizon, scenarioName, startDate, view,
+        activeSavedId, activeSavedName,
+      }))
+    } catch {}
+  }, [STORAGE_KEY, nodes, edges, horizon, scenarioName, startDate, view, activeSavedId, activeSavedName])
 
   useEffect(() => {
     onContextChange(`${functionName} (Analytics): workflow with ${nodes.length} nodes, ${edges.length} edges, ${runs.length} runs`)
@@ -341,6 +382,110 @@ function AnalyticsCanvas({ functionId, functionName, onAskAgent, onContextChange
     setError(null)
     setValidation(null)
     setRunError(null)
+    // Detach from any loaded saved-workflow so the next Save creates
+    // a new record rather than overwriting the one the analyst loaded.
+    setActiveSavedId(null)
+    setActiveSavedName(null)
+    setLastResult(null)
+    try { localStorage.removeItem(STORAGE_KEY) } catch {}
+  }
+
+  // ── Saved workflows: save / load / delete ────────────────────
+  const buildSavePayload = (name: string, description?: string) => ({
+    function_id: functionId,
+    name,
+    description,
+    // Persist nodes verbatim — ReactFlow's positions, our NodeData,
+    // and any per-node config. The backend round-trips them as opaque
+    // dicts; only the frontend interprets the shape.
+    nodes,
+    edges,
+    horizon_months: horizon,
+    scenario_name: scenarioName || undefined,
+    start_date: startDate || undefined,
+    view,
+  })
+
+  const saveCurrentWorkflow = async () => {
+    if (nodes.length === 0) {
+      setError('Nothing to save — drag nodes onto the canvas first.')
+      return
+    }
+    const defaultName = activeSavedName || `Workflow ${new Date().toLocaleString()}`
+    const name = window.prompt('Save current workflow as:', defaultName)?.trim()
+    if (!name) return
+    try {
+      if (activeSavedId) {
+        // PUT — overwrite the loaded record.
+        const r = await api.put<SavedWorkflow>(
+          `/api/analytics/workflows/${activeSavedId}`,
+          buildSavePayload(name),
+        )
+        setActiveSavedId(r.data.id)
+        setActiveSavedName(r.data.name)
+      } else {
+        const r = await api.post<SavedWorkflow>('/api/analytics/workflows', buildSavePayload(name))
+        setActiveSavedId(r.data.id)
+        setActiveSavedName(r.data.name)
+      }
+      loadSavedWorkflows()
+    } catch (e: any) {
+      setError(e?.response?.data?.detail || 'Could not save workflow')
+    }
+  }
+
+  const saveAsNewWorkflow = async () => {
+    if (nodes.length === 0) {
+      setError('Nothing to save — drag nodes onto the canvas first.')
+      return
+    }
+    const name = window.prompt('Save as new workflow:', '')?.trim()
+    if (!name) return
+    try {
+      const r = await api.post<SavedWorkflow>('/api/analytics/workflows', buildSavePayload(name))
+      setActiveSavedId(r.data.id)
+      setActiveSavedName(r.data.name)
+      loadSavedWorkflows()
+    } catch (e: any) {
+      setError(e?.response?.data?.detail || 'Could not save workflow')
+    }
+  }
+
+  const loadSavedWorkflow = async (workflowId: string) => {
+    try {
+      const r = await api.get<SavedWorkflow>(`/api/analytics/workflows/${workflowId}`)
+      // Replace canvas state in one shot.
+      setNodes(r.data.nodes as any)
+      setEdges(r.data.edges as any)
+      setHorizon(r.data.horizon_months)
+      setScenarioName(r.data.scenario_name || '')
+      setStartDate(r.data.start_date || '')
+      setView(r.data.view as WorkflowView)
+      setActiveSavedId(r.data.id)
+      setActiveSavedName(r.data.name)
+      setError(null)
+      setValidation(null)
+      setRunError(null)
+      setLastResult(null)
+      setSavedMenuOpen(false)
+    } catch (e: any) {
+      setError(e?.response?.data?.detail || 'Could not load workflow')
+    }
+  }
+
+  const deleteSavedWorkflow = async (workflowId: string, name: string) => {
+    if (!window.confirm(`Delete saved workflow "${name}"? This can't be undone.`)) return
+    try {
+      await api.delete(`/api/analytics/workflows/${workflowId}`)
+      // If the deleted one was the loaded record, detach.
+      if (activeSavedId === workflowId) {
+        setActiveSavedId(null)
+        setActiveSavedName(null)
+      }
+      loadSavedWorkflows()
+    } catch (e: any) {
+      setError(e?.response?.data?.detail || 'Could not delete workflow')
+    }
   }
 
   // ── Validate workflow ────────────────────────────────────────
@@ -808,7 +953,37 @@ function AnalyticsCanvas({ functionId, functionName, onAskAgent, onContextChange
             {edges.length} edge{edges.length === 1 ? '' : 's'}
           </div>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 flex-wrap">
+          <SavedWorkflowsMenu
+            saved={savedWorkflows}
+            activeSavedId={activeSavedId}
+            activeSavedName={activeSavedName}
+            open={savedMenuOpen}
+            onToggle={() => setSavedMenuOpen((o) => !o)}
+            onClose={() => setSavedMenuOpen(false)}
+            onLoad={loadSavedWorkflow}
+            onDelete={deleteSavedWorkflow}
+          />
+          <button
+            onClick={saveCurrentWorkflow}
+            disabled={nodes.length === 0}
+            className="px-3 py-2 rounded-lg text-xs font-semibold disabled:opacity-40 flex items-center gap-1.5"
+            style={{ background: 'var(--bg-card)', border: '1px solid #2563EB', color: '#2563EB' }}
+            title={activeSavedId ? `Update saved workflow "${activeSavedName}"` : 'Save current workflow'}
+          >
+            <Save size={13} /> {activeSavedId ? 'Save' : 'Save…'}
+          </button>
+          {activeSavedId && (
+            <button
+              onClick={saveAsNewWorkflow}
+              disabled={nodes.length === 0}
+              className="px-3 py-2 rounded-lg text-xs font-semibold disabled:opacity-40"
+              style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border)', color: 'var(--text-secondary)' }}
+              title="Save as a new workflow record (don't overwrite the loaded one)"
+            >
+              Save as…
+            </button>
+          )}
           <button
             onClick={runValidate}
             disabled={nodes.length === 0 || validating}
@@ -1526,6 +1701,119 @@ const SEVERITY_TONE: Record<WorkflowValidationIssue['severity'], { color: string
   error:   { color: 'var(--error)',   bg: 'var(--error-bg)',   icon: AlertCircle,   label: 'BLOCKER' },
   warning: { color: 'var(--warning)', bg: 'var(--warning-bg)', icon: AlertCircle,   label: 'WARNING' },
   info:    { color: 'var(--accent)',  bg: 'var(--accent-light)', icon: Sparkles,    label: 'NOTE'    },
+}
+
+// ── Saved-workflows dropdown ────────────────────────────────────────────
+function SavedWorkflowsMenu({
+  saved, activeSavedId, activeSavedName, open,
+  onToggle, onClose, onLoad, onDelete,
+}: {
+  saved: SavedWorkflowSummary[]
+  activeSavedId: string | null
+  activeSavedName: string | null
+  open: boolean
+  onToggle: () => void
+  onClose: () => void
+  onLoad: (id: string) => void
+  onDelete: (id: string, name: string) => void
+}) {
+  const label = activeSavedName || 'Saved workflows'
+  return (
+    <div className="relative">
+      <button
+        onClick={onToggle}
+        className="px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-1.5"
+        style={{
+          background: 'var(--bg-card)',
+          border: '1px solid var(--border)',
+          color: 'var(--text-primary)',
+          minWidth: 150,
+        }}
+        title="Saved workflows for this function"
+      >
+        <Bookmark size={13} />
+        <span className="truncate" style={{ maxWidth: 180 }}>{label}</span>
+        <span className="font-mono ml-auto" style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+          {saved.length}
+        </span>
+      </button>
+      {open && (
+        <>
+          {/* Backdrop to dismiss on outside click */}
+          <div
+            onClick={onClose}
+            style={{ position: 'fixed', inset: 0, zIndex: 40 }}
+          />
+          <div
+            className="rounded-lg overflow-hidden"
+            style={{
+              position: 'absolute',
+              top: 'calc(100% + 4px)',
+              left: 0,
+              minWidth: 320,
+              maxWidth: 420,
+              maxHeight: 360,
+              overflowY: 'auto',
+              background: 'var(--bg-card)',
+              border: '1px solid var(--border)',
+              boxShadow: '0 8px 24px rgba(0,0,0,0.10)',
+              zIndex: 50,
+            }}
+          >
+            {saved.length === 0 ? (
+              <div
+                className="px-3 py-4 text-xs text-center"
+                style={{ color: 'var(--text-muted)' }}
+              >
+                No saved workflows yet. Build one and click Save to add the first.
+              </div>
+            ) : (
+              <ul className="divide-y" style={{ borderColor: 'var(--border-subtle)' }}>
+                {saved.map((s) => {
+                  const isActive = s.id === activeSavedId
+                  return (
+                    <li
+                      key={s.id}
+                      className="px-3 py-2 flex items-start gap-2 group hover:bg-[var(--bg-elevated)] cursor-default"
+                      style={{ background: isActive ? 'var(--accent-light)' : 'transparent' }}
+                    >
+                      <button
+                        onClick={() => onLoad(s.id)}
+                        className="flex-1 text-left min-w-0"
+                      >
+                        <div
+                          className="text-[12px] font-semibold truncate"
+                          style={{ color: isActive ? 'var(--accent)' : 'var(--text-primary)' }}
+                        >
+                          {s.name}
+                          {isActive && <span className="ml-1 font-mono text-[9px]">· loaded</span>}
+                        </div>
+                        <div className="text-[10px] font-mono" style={{ color: 'var(--text-muted)' }}>
+                          {s.node_count} node{s.node_count === 1 ? '' : 's'} · {s.edge_count} edge{s.edge_count === 1 ? '' : 's'}
+                          {' · '}
+                          {(s.updated_at || s.created_at).slice(0, 10)}
+                        </div>
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); onDelete(s.id, s.name) }}
+                        className="p-1 rounded-md opacity-0 group-hover:opacity-100 transition-opacity"
+                        style={{ color: 'var(--text-muted)' }}
+                        title="Delete this saved workflow"
+                        onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.color = 'var(--error)')}
+                        onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.color = 'var(--text-muted)')}
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    </li>
+                  )
+                })}
+              </ul>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  )
 }
 
 function WorkflowValidationPanel({
