@@ -20,6 +20,7 @@ from packs import Pack, PackContext
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 _SAMPLE_DATA = _REPO_ROOT / "sample_data" / "deposits"
 _SAMPLE_MODELS = _REPO_ROOT / "sample_models" / "deposits"
+_CCAR_DATA = _REPO_ROOT / "sample_data" / "ccar"
 
 
 def register(ctx: PackContext) -> None:
@@ -60,6 +61,41 @@ def register(ctx: PackContext) -> None:
             "the offline fallback shape so the demo runs without a proxy."
         ),
         source_path=_SAMPLE_DATA / "data_harness.csv",
+    )
+
+    # CCAR cycle data — wide format with per-scenario columns. 10 quarters
+    # × 2 cycles (CCAR25 / CCAR26) × 4 scenarios (BHCB, BHCS, FedB, FedSA).
+    # Used by the Reporting tab tiles below + available to any analyst
+    # comparing supervisory paths across cycles.
+    ctx.attach_dataset(
+        function_id="capital_planning",
+        dataset_id="ds-ccar-scenarios",
+        name="CCAR Scenarios",
+        description=(
+            "CCAR macro paths for BHCB / BHCS / FedB / FedSA across 9 "
+            "projection quarters (PQ0–PQ9) for cycles CCAR25 (Q4-2024 "
+            "start) and CCAR26 (Q4-2025 start). Variables: unemployment "
+            "rate, employment growth y/y, HPI y/y, CRE price y/y, real "
+            "GDP q/q ann'lzd, M2 ($B), oil ($/bbl), Fed funds target, "
+            "1y UST, 10y UST, BBB spread (bp), and M2/GDP."
+        ),
+        source_path=_CCAR_DATA / "ccar_scenarios.csv",
+    )
+
+    # Peak-value summary — backs the BHC comparison table on Reporting.
+    # 9 rows (one per macro variable, M2 + 1y UST excluded) ×
+    # 5 columns: macro, bhcb_25, bhcb_26, bhcs_25, bhcs_26.
+    ctx.attach_dataset(
+        function_id="capital_planning",
+        dataset_id="ds-ccar-peak-summary",
+        name="CCAR Peak Summary",
+        description=(
+            "Worst-case (peak) value for each macro variable across "
+            "PQ0–PQ9 under the BHC scenarios in CCAR25 and CCAR26. "
+            "Direction: max for unemployment + BBB spread, min for "
+            "everything else (the trough during stress)."
+        ),
+        source_path=_CCAR_DATA / "ccar_peak_summary.csv",
     )
 
     # 2b) Data Harness transform — the ETL step on the canvas that reads
@@ -211,18 +247,17 @@ def check(df, *, min_rows=12, max_null_rate=0.05, value_bounds=None):
         ],
     )
 
-    # 3) Models — three MaaS pickles. multi_target output_kind so the
-    #    sandbox returns a 2-column matrix and `_post_process` writes
-    #    `end_balance_mm` and `interest_income_mm` into each row.
-    common_target_names = ["end_balance_mm", "interest_income_mm"]
-
+    # 3) Models — three MaaS pickles + the NII Calculator that
+    #    aggregates them. Each MaaS emits segment-prefixed (rate, balance)
+    #    columns so the orchestrator can merge three frames cleanly when
+    #    they fan into the NII Calculator.
     ctx.attach_model(
         function_id="capital_planning",
         model_id="mdl-deposits-rdmaas",
         name="RDMaaS",
         description=(
-            "Retail Deposit Model-as-a-Service. Projects end-of-month "
-            "balance and interest income for the retail deposit book given "
+            "Retail Deposit Model-as-a-Service. Projects monthly deposit "
+            "rate paid and end-of-month balance for the retail book given "
             "pricing strategy (promo/standard APY), competitive pricing "
             "(market gap), and account information (active accounts, avg "
             "balance, attrition)."
@@ -234,17 +269,17 @@ def check(df, *, min_rows=12, max_null_rate=0.05, value_bounds=None):
             "promo_account_share_pct": 30.0,
         },
         output_kind="multi_target",
-        target_names=common_target_names,
+        target_names=["rdmaas_rate_pct", "rdmaas_balance_mm"],
     )
     ctx.attach_model(
         function_id="capital_planning",
         model_id="mdl-deposits-commmaas",
         name="CommMaaS",
         description=(
-            "Commercial Deposit Model-as-a-Service. Projects end-of-month "
-            "balance and interest income for the commercial deposit book "
-            "based on corporate treasury demand, line-of-credit utilization, "
-            "and rate-sensitivity beta."
+            "Commercial Deposit Model-as-a-Service. Projects monthly "
+            "deposit rate paid and end-of-month balance for the commercial "
+            "book based on corporate treasury demand, line-of-credit "
+            "utilization, and rate-sensitivity beta."
         ),
         source_path=_SAMPLE_MODELS / "commmaas.pkl",
         train_metrics={
@@ -253,7 +288,7 @@ def check(df, *, min_rows=12, max_null_rate=0.05, value_bounds=None):
             "deposit_beta": 0.45,
         },
         output_kind="multi_target",
-        target_names=common_target_names,
+        target_names=["commmaas_rate_pct", "commmaas_balance_mm"],
     )
     ctx.attach_model(
         function_id="capital_planning",
@@ -261,9 +296,9 @@ def check(df, *, min_rows=12, max_null_rate=0.05, value_bounds=None):
         name="SBBMaaS",
         description=(
             "Small-Business Banking Deposit Model-as-a-Service. Projects "
-            "end-of-month balance and interest income for the small-business "
-            "deposit book using merchant-acquiring volume, new SB loan "
-            "originations, and rate-sensitivity beta."
+            "monthly deposit rate paid and end-of-month balance for the "
+            "small-business book using merchant-acquiring volume, new SB "
+            "loan originations, and rate-sensitivity beta."
         ),
         source_path=_SAMPLE_MODELS / "sbbmaas.pkl",
         train_metrics={
@@ -272,11 +307,109 @@ def check(df, *, min_rows=12, max_null_rate=0.05, value_bounds=None):
             "deposit_beta": 0.38,
         },
         output_kind="multi_target",
-        target_names=common_target_names,
+        target_names=["sbbmaas_rate_pct", "sbbmaas_balance_mm"],
+    )
+    ctx.attach_model(
+        function_id="capital_planning",
+        model_id="mdl-deposits-nii-calculator",
+        name="NII Calculator",
+        description=(
+            "Net Interest Income aggregator. Takes the rate + balance "
+            "outputs of RDMaaS, CommMaaS, and SBBMaaS and computes the "
+            "monthly interest income contribution of each deposit product "
+            "across the next 9 quarters: NII = balance_mm × rate_pct / 100 / 12."
+        ),
+        source_path=_SAMPLE_MODELS / "nii_calculator.pkl",
+        train_metrics={"horizon_months": 27.0, "segment_count": 3.0},
+        output_kind="multi_target",
+        target_names=["nii_rdmaas_mm", "nii_commmaas_mm", "nii_sbbmaas_mm"],
     )
 
-    # No reporting tiles attached. The starter tiles were backed by the
-    # `ds-deposits-results` dataset (a workflow output staged as a CSV);
-    # removing that dataset means the Capital Planning Overview starts
-    # empty. Analysts populate it by running their workflow, then pinning
-    # tiles from the Reporting catalog onto Overview.
+    # 4) Reporting tiles — backed by the CCAR Scenarios dataset.
+    #
+    #   • Comparison table: BHCB and BHCS across CCAR25 + CCAR26 for
+    #     every macro variable except M2 and 1-year UST (per spec).
+    #   • Three line plots filtered to CCAR26: 1y UST, Fed funds, M2/GDP.
+    #     Each plot has two y_fields → two lines (BHCB + BHCS).
+    #
+    # All four are unpinned — they live in the Reporting catalog. The
+    # analyst pins from there onto Overview if they want them up top.
+
+    # Comparison table — rows are macro variables, columns are the four
+    # (scenario × cycle) combos. Backed by ccar_peak_summary.csv whose
+    # cells already carry the worst-case value per (var, scenario, cycle).
+    ctx.attach_plot(
+        function_id="capital_planning",
+        plot_id="plot-ccar-peak-summary",
+        config={
+            "name": "BHC Base vs Stress — Peak values, CCAR25 vs CCAR26",
+            "tile_type": "table",
+            "dataset_id": "ds-ccar-peak-summary",
+            "table_columns": ["macro", "bhcb_25", "bhcb_26", "bhcs_25", "bhcs_26"],
+            "filters": [],
+            "description": (
+                "One row per macro variable; cells show the peak (worst-case) "
+                "value during the 9-quarter horizon. Max for unemployment + "
+                "BBB spread, min for everything else. M2 and 1-year UST "
+                "intentionally omitted — they live in the line plots below."
+            ),
+            "pinned_to_overview": False,
+        },
+    )
+
+    # Line plots — BHCB + BHCS, two y_fields = two lines.
+    # Palette pins BHCB → dark blue, BHCS → red across all three plots.
+    _CCAR26_FILTER = [{"field": "cycle", "op": "eq", "value": "CCAR26"}]
+    _BHC_PALETTE = ["#1E3A8A", "#DC2626"]   # dark blue, red — order matches y_fields
+
+    ctx.attach_plot(
+        function_id="capital_planning",
+        plot_id="plot-ccar-1y-ust",
+        config={
+            "name": "1-year Treasury — BHCB vs BHCS (CCAR26)",
+            "tile_type": "plot",
+            "chart_type": "line",
+            "dataset_id": "ds-ccar-scenarios",
+            "x_field": "pq",
+            "y_fields": ["bhcb_ust_1y_pct", "bhcs_ust_1y_pct"],
+            "aggregation": "none",
+            "filters": _CCAR26_FILTER,
+            "style": {"palette": _BHC_PALETTE},
+            "description": "1-year UST yield projection across PQ0–PQ9 under BHCB and BHCS.",
+            "pinned_to_overview": False,
+        },
+    )
+    ctx.attach_plot(
+        function_id="capital_planning",
+        plot_id="plot-ccar-fed-funds",
+        config={
+            "name": "Fed funds effective rate — BHCB vs BHCS (CCAR26)",
+            "tile_type": "plot",
+            "chart_type": "line",
+            "dataset_id": "ds-ccar-scenarios",
+            "x_field": "pq",
+            "y_fields": ["bhcb_fed_funds_pct", "bhcs_fed_funds_pct"],
+            "aggregation": "none",
+            "filters": _CCAR26_FILTER,
+            "style": {"palette": _BHC_PALETTE},
+            "description": "Fed funds policy path across PQ0–PQ9 under BHCB and BHCS.",
+            "pinned_to_overview": False,
+        },
+    )
+    ctx.attach_plot(
+        function_id="capital_planning",
+        plot_id="plot-ccar-m2-gdp",
+        config={
+            "name": "M2 / GDP — BHCB vs BHCS (CCAR26)",
+            "tile_type": "plot",
+            "chart_type": "line",
+            "dataset_id": "ds-ccar-scenarios",
+            "x_field": "pq",
+            "y_fields": ["bhcb_m2_to_gdp_ratio", "bhcs_m2_to_gdp_ratio"],
+            "aggregation": "none",
+            "filters": _CCAR26_FILTER,
+            "style": {"palette": _BHC_PALETTE},
+            "description": "Money supply relative to nominal GDP across PQ0–PQ9 under BHCB and BHCS.",
+            "pinned_to_overview": False,
+        },
+    )

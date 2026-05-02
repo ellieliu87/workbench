@@ -141,17 +141,23 @@ class PackContext:
         name: str,
         description: str,
         source_path: Path | str,
+        dataset_role: str = "input",
     ) -> None:
         """Stage a bundled CSV/Parquet/etc. as a dataset for a function.
 
         The router (datasets.py) copies the file into its data dir on first
-        load and registers a `Dataset` with `source='pack'` + `pack_id`."""
+        load and registers a `Dataset` with `source='pack'` + `pack_id`.
+
+        `dataset_role` ('input' | 'output') decides which subsection of
+        the Data tab the dataset shows up under. Defaults to 'input'.
+        """
         _DATASET_ATTACHMENTS.append({
             "function_id": function_id,
             "dataset_id": dataset_id,
             "name": name,
             "description": description,
             "source_path": Path(source_path),
+            "dataset_role": dataset_role,
             "pack_id": self.pack.id,
         })
 

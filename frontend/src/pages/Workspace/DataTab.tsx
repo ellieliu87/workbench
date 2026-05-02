@@ -242,19 +242,27 @@ function DatasetsSection({ functionId, functionName, onAskAgent }: SectionProps)
         </div>
       )}
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-        {datasets.map((d) => (
-          <DatasetCard
-            key={d.id}
-            dataset={d}
-            sourceName={sources.find((s) => s.id === d.data_source_id)?.name}
-            onPreview={() => setPreviewFor(d)}
-            onDelete={() => remove(d.id)}
-            onExplain={() => explainDataset(d)}
-            onQualityCheck={() => runQualityCheck(d)}
-          />
-        ))}
-      </div>
+      <DatasetRoleSection
+        title="Input data"
+        sublabel="Datasets the workflow reads from — bound tables, uploads, and pack-attached sources."
+        items={datasets.filter((d) => (d.dataset_role || 'input') === 'input')}
+        sources={sources}
+        onPreview={(d) => setPreviewFor(d)}
+        onDelete={remove}
+        onExplain={explainDataset}
+        onQualityCheck={runQualityCheck}
+      />
+
+      <DatasetRoleSection
+        title="Output data"
+        sublabel="Tables the workflow writes results to — destinations, post-model snapshots."
+        items={datasets.filter((d) => d.dataset_role === 'output')}
+        sources={sources}
+        onPreview={(d) => setPreviewFor(d)}
+        onDelete={remove}
+        onExplain={explainDataset}
+        onQualityCheck={runQualityCheck}
+      />
 
       {bindOpen && (
         <BindTableModal
@@ -279,6 +287,66 @@ function DatasetsSection({ functionId, functionName, onAskAgent }: SectionProps)
         />
       )}
     </div>
+  )
+}
+
+// ── Role section (Input data / Output data) ───────────────────────────────
+function DatasetRoleSection({
+  title, sublabel, items, sources,
+  onPreview, onDelete, onExplain, onQualityCheck,
+}: {
+  title: string
+  sublabel: string
+  items: Dataset[]
+  sources: DataSource[]
+  onPreview: (d: Dataset) => void
+  onDelete: (id: string) => void
+  onExplain: (d: Dataset) => void
+  onQualityCheck: (d: Dataset) => void
+}) {
+  return (
+    <section className="mb-6">
+      <div className="flex items-baseline gap-2 mb-2">
+        <h2
+          className="text-[12px] font-bold uppercase tracking-widest"
+          style={{ color: 'var(--text-primary)' }}
+        >
+          {title}
+        </h2>
+        <span className="text-[10px] font-mono" style={{ color: 'var(--text-muted)' }}>
+          {items.length}
+        </span>
+        <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+          · {sublabel}
+        </span>
+      </div>
+      {items.length === 0 ? (
+        <div
+          className="rounded-md text-center text-xs px-3 py-4"
+          style={{
+            background: 'var(--bg-elevated)',
+            border: '1px dashed var(--border)',
+            color: 'var(--text-muted)',
+          }}
+        >
+          None yet.
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+          {items.map((d) => (
+            <DatasetCard
+              key={d.id}
+              dataset={d}
+              sourceName={sources.find((s) => s.id === d.data_source_id)?.name}
+              onPreview={() => onPreview(d)}
+              onDelete={() => onDelete(d.id)}
+              onExplain={() => onExplain(d)}
+              onQualityCheck={() => onQualityCheck(d)}
+            />
+          ))}
+        </div>
+      )}
+    </section>
   )
 }
 
@@ -412,45 +480,59 @@ function BindTableModal({
   onClose: () => void
   onCreated: () => void
 }) {
-  const connected = sources.filter((s) => s.status === 'connected' && s.type !== 'file_upload')
+  // Three source types are bindable from this modal: OneLake + Snowflake
+  // (SQL-driven) and S3 (path-driven). Postgres / REST / file_upload
+  // sources are filtered out — those have other registration paths.
+  const ALLOWED_TYPES = new Set<DataSource['type']>(['onelake', 'snowflake', 's3'])
+  const connected = sources.filter(
+    (s) => s.status === 'connected' && ALLOWED_TYPES.has(s.type),
+  )
   const [sourceId, setSourceId] = useState<string>(connected[0]?.id || '')
-  const [tables, setTables] = useState<DataSourceTable[]>([])
-  const [tableRef, setTableRef] = useState<string>('')
+  const selectedSource = sources.find((s) => s.id === sourceId)
+  const isS3 = selectedSource?.type === 's3'
+
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
-  const [filter, setFilter] = useState('')
+  const [datasetRole, setDatasetRole] = useState<'input' | 'output'>('input')
+  const [sqlQuery, setSqlQuery] = useState('')
+  const [s3Path, setS3Path] = useState('')
+  const [agentPrompt, setAgentPrompt] = useState('')
+  const [drafting, setDrafting] = useState(false)
+  const [draftNote, setDraftNote] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  // Auto-fill the dataset name from the S3 path's basename so the user
+  // doesn't have to retype it.
   useEffect(() => {
-    if (!sourceId) return
-    setTables([])
-    setTableRef('')
-    api
-      .get<{ source_id: string; tables: DataSourceTable[] }>(`/api/datasources/${sourceId}/tables`)
-      .then((r) => setTables(r.data.tables))
-      .catch(() => setTables([]))
-  }, [sourceId])
-
-  useEffect(() => {
-    if (tableRef && !name) {
-      setName(tableRef.split('.').pop() || tableRef)
+    if (isS3 && s3Path && !name) {
+      const trimmed = s3Path.replace(/\/+$/, '')
+      const tail = trimmed.split('/').pop() || trimmed
+      if (tail) setName(tail)
     }
-  }, [tableRef]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  const filtered = tables.filter((t) => t.ref.toLowerCase().includes(filter.toLowerCase()))
-  const selectedTable = tables.find((t) => t.ref === tableRef)
+  }, [isS3, s3Path]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const submit = async () => {
-    if (!sourceId || !tableRef || !name) return
+    if (!sourceId || !name) return
+    if (isS3 && !s3Path.trim()) {
+      setError('S3 sources require a bucket / key path.')
+      return
+    }
+    if (!isS3 && !sqlQuery.trim()) {
+      setError(`${selectedSource?.type === 'onelake' ? 'OneLake' : 'Snowflake'} sources require a SQL query.`)
+      return
+    }
     setSaving(true)
     setError(null)
     try {
       await api.post('/api/datasets/from-table', {
         function_id: functionId,
-        name, description,
+        name,
+        description,
         data_source_id: sourceId,
-        table_ref: tableRef,
+        table_ref: isS3 ? s3Path.trim() : undefined,
+        dataset_role: datasetRole,
+        sql_query: isS3 ? undefined : sqlQuery.trim(),
       })
       onCreated()
     } catch (e: any) {
@@ -460,93 +542,133 @@ function BindTableModal({
     }
   }
 
+  const draftSql = async () => {
+    if (!agentPrompt.trim()) return
+    setDrafting(true)
+    setDraftNote(null)
+    try {
+      const r = await api.post<{ sql_query: string; note?: string }>(
+        '/api/datasets/draft-sql',
+        {
+          // No specific table_ref any more — the agent infers / uses
+          // whatever the description names. The user edits before binding.
+          table_ref: '',
+          description: agentPrompt.trim(),
+          columns: [],
+        },
+      )
+      setSqlQuery(r.data.sql_query)
+      setDraftNote(r.data.note || null)
+    } catch (e: any) {
+      setDraftNote(e?.response?.data?.detail || 'Could not draft SQL')
+    } finally {
+      setDrafting(false)
+    }
+  }
+
   return (
     <Modal title="Bind a Table as Dataset" onClose={onClose}>
-      <Field label="Data Source">
+      <Field label="Type">
+        <RoleRadio value={datasetRole} onChange={setDatasetRole} />
+      </Field>
+
+      <Field label="Data Source" hint="OneLake or Snowflake → query with SQL. S3 → reference by URL path.">
         <select
           value={sourceId}
           onChange={(e) => setSourceId(e.target.value)}
           className="input"
         >
-          {connected.length === 0 && <option value="">No connected sources</option>}
+          {connected.length === 0 && (
+            <option value="">No connected OneLake / Snowflake / S3 sources</option>
+          )}
           {connected.map((s) => (
-            <option key={s.id} value={s.id}>{s.name}</option>
+            <option key={s.id} value={s.id}>
+              {s.name}  ({s.type})
+            </option>
           ))}
         </select>
       </Field>
 
-      <Field label={`Table (${tables.length} available)`}>
-        <div className="relative mb-2">
-          <Search
-            size={12}
-            className="absolute left-2.5 top-1/2 -translate-y-1/2"
-            style={{ color: 'var(--text-muted)' }}
-          />
-          <input
-            value={filter}
-            onChange={(e) => setFilter(e.target.value)}
-            placeholder="Filter tables…"
-            className="input"
-            style={{ paddingLeft: 28 }}
-          />
-        </div>
-        <div
-          className="rounded-lg p-1 space-y-0.5"
-          style={{
-            background: 'var(--bg-elevated)',
-            border: '1px solid var(--border)',
-            maxHeight: 220,
-            overflowY: 'auto',
-          }}
+      {isS3 ? (
+        // ── S3 path-driven binding ─────────────────────────────────────
+        <Field
+          label="S3 URL path"
+          hint={`Full s3:// URL the workflow will read at run time. Wildcards / prefixes are fine.`}
         >
-          {filtered.length === 0 && (
-            <div className="text-xs px-2 py-3" style={{ color: 'var(--text-muted)' }}>
-              No tables match.
-            </div>
-          )}
-          {filtered.map((t) => {
-            const sel = t.ref === tableRef
-            return (
-              <button
-                key={t.ref}
-                onClick={() => setTableRef(t.ref)}
-                className="w-full text-left px-2 py-1.5 rounded-md transition-colors"
-                style={{
-                  background: sel ? 'var(--accent-light)' : 'transparent',
-                  color: sel ? 'var(--accent)' : 'var(--text-primary)',
-                }}
-              >
-                <div className="font-mono text-xs font-semibold">{t.ref}</div>
-                <div className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
-                  {t.columns.length} columns: {t.columns.slice(0, 4).map((c) => c.name).join(', ')}
-                  {t.columns.length > 4 ? '…' : ''}
-                </div>
-              </button>
-            )
-          })}
-        </div>
-      </Field>
+          <input
+            value={s3Path}
+            onChange={(e) => setS3Path(e.target.value)}
+            className="input font-mono"
+            placeholder="s3://cma-outputs/runs/2026-04/"
+          />
+        </Field>
+      ) : (
+        // ── OneLake / Snowflake SQL-driven binding ─────────────────────
+        <>
+          <Field
+            label="SQL query"
+            hint="The SELECT statement that defines this dataset. Runs against the connected data source."
+          >
+            <textarea
+              rows={5}
+              className="input font-mono"
+              style={{ fontSize: 12, lineHeight: 1.55 }}
+              value={sqlQuery}
+              onChange={(e) => setSqlQuery(e.target.value)}
+              placeholder={
+                selectedSource?.type === 'onelake'
+                  ? "SELECT * FROM Finance.cma.macro_scenario WHERE …"
+                  : "SELECT * FROM CMA.PUBLIC.MACRO_SCENARIO WHERE …"
+              }
+            />
+          </Field>
 
-      {selectedTable && (
-        <Field label="Schema preview">
+          {/* Agent box — describe what you want, get a SQL draft. */}
           <div
-            className="rounded-lg p-2 font-mono"
+            className="rounded-md p-3"
             style={{
-              background: 'var(--bg-elevated)',
-              border: '1px solid var(--border)',
-              fontSize: 11,
-              maxHeight: 140,
-              overflowY: 'auto',
+              background: 'var(--accent-light)',
+              border: '1px solid var(--accent)',
             }}
           >
-            {selectedTable.columns.map((c) => (
-              <div key={c.name} className="flex justify-between">
-                <span style={{ color: 'var(--text-primary)' }}>{c.name}</span>
-                <span style={{ color: 'var(--text-muted)' }}>{c.dtype}</span>
+            <div className="flex items-baseline justify-between mb-1.5 gap-2 flex-wrap">
+              <div
+                className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-1"
+                style={{ color: 'var(--accent)' }}
+              >
+                <Sparkles size={11} /> Ask the agent
               </div>
-            ))}
+              {draftNote && (
+                <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
+                  {draftNote}
+                </span>
+              )}
+            </div>
+            <textarea
+              rows={2}
+              className="input"
+              style={{ fontSize: 12, lineHeight: 1.45 }}
+              value={agentPrompt}
+              onChange={(e) => setAgentPrompt(e.target.value)}
+              placeholder="e.g. read macro_scenario where as_of_date is in 2026 Q2 and severity = 'adverse', limit 100"
+              disabled={drafting}
+            />
+            <div className="flex items-center justify-between gap-2 mt-2">
+              <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                Drafts a SQL query from your description. You can edit before binding.
+              </span>
+              <button
+                onClick={draftSql}
+                disabled={!agentPrompt.trim() || drafting}
+                className="px-3 py-1.5 rounded-md text-xs font-semibold flex items-center gap-1.5 disabled:opacity-50"
+                style={{ background: 'var(--accent)', color: '#fff' }}
+              >
+                {drafting ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}
+                {drafting ? 'Drafting…' : 'Generate SQL'}
+              </button>
+            </div>
           </div>
-        </Field>
+        </>
       )}
 
       <div className="grid grid-cols-2 gap-3">
@@ -571,7 +693,7 @@ function BindTableModal({
       <ModalFooter
         onClose={onClose}
         onSubmit={submit}
-        disabled={!sourceId || !tableRef || !name || saving}
+        disabled={!sourceId || !name || saving || (isS3 ? !s3Path.trim() : !sqlQuery.trim())}
         submitLabel={saving ? 'Binding…' : 'Bind Dataset'}
       />
     </Modal>
@@ -589,6 +711,7 @@ function UploadFileModal({
   const [files, setFiles] = useState<File[]>([])
   const [names, setNames] = useState<Record<number, string>>({})
   const [description, setDescription] = useState('')
+  const [datasetRole, setDatasetRole] = useState<'input' | 'output'>('input')
   const [saving, setSaving] = useState(false)
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null)
   const [errors, setErrors] = useState<{ file: string; message: string }[]>([])
@@ -639,6 +762,7 @@ function UploadFileModal({
       const finalName = (names[i] && names[i].trim()) || stem
       fd.append('name', finalName)
       if (description) fd.append('description', description)
+      fd.append('dataset_role', datasetRole)
       try {
         await api.post('/api/datasets/upload', fd, {
           headers: { 'Content-Type': 'multipart/form-data' },
@@ -658,6 +782,9 @@ function UploadFileModal({
 
   return (
     <Modal title="Upload Dataset Files" onClose={onClose}>
+      <Field label="Type">
+        <RoleRadio value={datasetRole} onChange={setDatasetRole} />
+      </Field>
       <Field label="Files (CSV / Parquet / XLSX / JSON, max 50 MB each — multi-select supported)">
         <input
           ref={inputRef}
@@ -1054,7 +1181,52 @@ function ModalFooter({
   )
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function RoleRadio({
+  value, onChange,
+}: { value: 'input' | 'output'; onChange: (v: 'input' | 'output') => void }) {
+  // Two-button segmented control. Used by both Upload File + Bind Table
+  // modals so the analyst declares whether they're registering an input
+  // (read by the workflow) or an output (written by the workflow).
+  const opt = (
+    val: 'input' | 'output',
+    label: string,
+    sublabel: string,
+    color: string,
+  ) => {
+    const active = value === val
+    return (
+      <button
+        type="button"
+        key={val}
+        onClick={() => onChange(val)}
+        className="flex-1 rounded-md text-left px-3 py-2 transition-colors"
+        style={{
+          background: active ? `${color}1A` : 'var(--bg-elevated)',
+          border: `1px solid ${active ? color : 'var(--border)'}`,
+          color: active ? color : 'var(--text-primary)',
+        }}
+      >
+        <div className="text-[12px] font-semibold">{label}</div>
+        <div
+          className="text-[10px] mt-0.5"
+          style={{ color: active ? color : 'var(--text-muted)' }}
+        >
+          {sublabel}
+        </div>
+      </button>
+    )
+  }
+  return (
+    <div className="flex gap-2">
+      {opt('input',  'Input data',  'Workflow reads from this',          '#0078D4')}
+      {opt('output', 'Output data', 'Workflow writes results here', '#059669')}
+    </div>
+  )
+}
+
+function Field({
+  label, hint, children,
+}: { label: string; hint?: string; children: React.ReactNode }) {
   return (
     <label className="block">
       <span
@@ -1064,6 +1236,14 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
         {label}
       </span>
       {children}
+      {hint && (
+        <span
+          className="block text-[10px] mt-1"
+          style={{ color: 'var(--text-muted)', lineHeight: 1.45 }}
+        >
+          {hint}
+        </span>
+      )}
     </label>
   )
 }

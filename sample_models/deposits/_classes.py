@@ -1,19 +1,29 @@
 """Deposit-suite model classes for the CMA Workbench demo.
 
-Three small Python classes mimic Capital One's real internal libraries:
-  - RDMaaS    Retail Deposit Model-as-a-Service
-  - CommMaaS  Commercial Deposit Model-as-a-Service
-  - SBBMaaS   Small-Business Banking Deposit Model-as-a-Service
+Four small Python classes mimic Capital One's real internal libraries:
 
-Each class:
-  - Sets `feature_names` so the sandboxed runner picks the right columns
-    out of the (intentionally wider) Data Harness output table.
-  - Implements `predict(X)` returning a 2-D ndarray shaped (n_rows, 2)
-    where columns are [end_balance_mm, interest_income_mm].
+  - RDMaaS         Retail   Deposit Model-as-a-Service
+  - CommMaaS       Commercial Deposit Model-as-a-Service
+  - SBBMaaS        Small-Business Banking Deposit Model-as-a-Service
+  - NIICalculator  Aggregates the three MaaS outputs into per-segment
+                   monthly Net Interest Income (NII).
 
-The math is intentionally lightweight — these are demo artifacts, not the
-production CCAR/PPNR estimators. Same shape and contract as the real
-libraries, so the canvas workflow + multi_target output_kind path
+Contract:
+
+  Each MaaS predict(X) returns (n_rows, 2) — *(rate_pct, balance_mm)*
+  per month, with column names prefixed by the segment so three model
+  outputs merge cleanly when wired in parallel into NII Calculator:
+      RDMaaS    → rdmaas_rate_pct,    rdmaas_balance_mm
+      CommMaaS  → commmaas_rate_pct,  commmaas_balance_mm
+      SBBMaaS   → sbbmaas_rate_pct,   sbbmaas_balance_mm
+
+  NIICalculator predict(X) returns (n_rows, 3) — *(nii per segment, mm)*
+  per month: nii_rdmaas_mm, nii_commmaas_mm, nii_sbbmaas_mm. The
+  formula per row is `balance × rate% / 100 / 12`.
+
+The math is intentionally lightweight — these are demo artifacts, not
+the production CCAR/PPNR estimators. Same shape and contract as the
+real libraries, so the canvas workflow + multi_target output_kind path
 exercises the full pipeline end-to-end.
 """
 from __future__ import annotations
@@ -24,7 +34,7 @@ import numpy as np
 class RDMaaS:
     """Retail Deposit Model-as-a-Service.
 
-    Drivers — the three families the user asked for:
+    Drivers (three families):
       pricing strategy:    retail_promo_apy_pct, retail_standard_apy_pct
       competitive pricing: competitor_apy_avg_pct, apy_spread_vs_market_bps
       account information: active_accounts_k, avg_balance_per_acct_usd,
@@ -40,11 +50,8 @@ class RDMaaS:
         "avg_balance_per_acct_usd",
         "account_attrition_pct",
     ]
-    # Library-author-declared metadata. Read at install time by the
-    # workbench so the analyst doesn't have to specify these in the
-    # install dialog.
     output_kind = "multi_target"
-    target_names = ["end_balance_mm", "interest_income_mm"]
+    target_names = ["rdmaas_rate_pct", "rdmaas_balance_mm"]
 
     starting_balance_mm = 240_000.0  # ~$240B retail deposit base
     promo_weight = 0.30              # 30% of accounts on promo, 70% on standard
@@ -69,10 +76,10 @@ class RDMaaS:
             balance *= (1.0 + growth)
 
             blended_apy = self.promo_weight * promo + (1 - self.promo_weight) * std
-            interest_income = balance * (blended_apy / 100.0) / 12.0
 
-            out[i, 0] = balance
-            out[i, 1] = interest_income
+            # column 0 → rate_pct, column 1 → balance_mm
+            out[i, 0] = blended_apy
+            out[i, 1] = balance
         return out
 
 
@@ -90,7 +97,7 @@ class CommMaaS:
         "loc_utilization_pct",
     ]
     output_kind = "multi_target"
-    target_names = ["end_balance_mm", "interest_income_mm"]
+    target_names = ["commmaas_rate_pct", "commmaas_balance_mm"]
 
     starting_balance_mm = 180_000.0  # ~$180B commercial deposit base
 
@@ -101,19 +108,15 @@ class CommMaaS:
         for i, row in enumerate(X):
             ff, beta, demand_idx, loc_util = row
 
-            # Treasury-demand index, normalized around 100.
             demand_effect = (demand_idx - 100.0) / 100.0 * 0.020
-            # LOC utilization above 50% signals corporates drawing down cash —
-            # negative signal for the deposit balance.
             loc_drag = -(loc_util - 50.0) / 100.0 * 0.015
             growth = demand_effect + loc_drag
             balance *= (1.0 + growth)
 
             paid_apy = ff * beta
-            interest_income = balance * (paid_apy / 100.0) / 12.0
 
-            out[i, 0] = balance
-            out[i, 1] = interest_income
+            out[i, 0] = paid_apy
+            out[i, 1] = balance
         return out
 
 
@@ -131,7 +134,7 @@ class SBBMaaS:
         "sb_loan_originations_mm",
     ]
     output_kind = "multi_target"
-    target_names = ["end_balance_mm", "interest_income_mm"]
+    target_names = ["sbbmaas_rate_pct", "sbbmaas_balance_mm"]
 
     starting_balance_mm = 45_000.0   # ~$45B small-business base
 
@@ -142,17 +145,48 @@ class SBBMaaS:
         for i, row in enumerate(X):
             ff, beta, mv_yoy, loans_mm = row
 
-            # YoY merchant volume growth → swept deposits, divided by 12 to
-            # get the monthly contribution.
             mv_effect = (mv_yoy / 100.0) / 12.0
-            # ~30% of newly originated loan balances persist as deposits.
             loan_effect = (loans_mm / max(balance, 1.0)) * 0.30
             growth = mv_effect + loan_effect
             balance *= (1.0 + growth)
 
             paid_apy = ff * beta
-            interest_income = balance * (paid_apy / 100.0) / 12.0
 
-            out[i, 0] = balance
-            out[i, 1] = interest_income
+            out[i, 0] = paid_apy
+            out[i, 1] = balance
+        return out
+
+
+class NIICalculator:
+    """Net Interest Income calculator.
+
+    Reads the three MaaS outputs (rate + balance per segment per month)
+    and returns the monthly NII contribution of each deposit product
+    over the next 9 quarters.
+
+      NII per segment (in $MM) = balance_mm × rate_pct / 100 / 12
+
+    The orchestrator merges the three upstream model frames on `month`
+    so by the time predict(X) runs, X carries all six columns. Three
+    NII columns are emitted (one per segment) so a downstream
+    destination — or a Reporting tile — can pivot per segment or sum to
+    the total.
+    """
+
+    feature_names = [
+        "rdmaas_rate_pct",   "rdmaas_balance_mm",
+        "commmaas_rate_pct", "commmaas_balance_mm",
+        "sbbmaas_rate_pct",  "sbbmaas_balance_mm",
+    ]
+    output_kind = "multi_target"
+    target_names = ["nii_rdmaas_mm", "nii_commmaas_mm", "nii_sbbmaas_mm"]
+
+    def predict(self, X):
+        X = np.asarray(X, dtype=float)
+        out = np.zeros((len(X), 3), dtype=float)
+        for i, row in enumerate(X):
+            rd_rate, rd_bal, cm_rate, cm_bal, sb_rate, sb_bal = row
+            out[i, 0] = rd_bal * (rd_rate / 100.0) / 12.0
+            out[i, 1] = cm_bal * (cm_rate / 100.0) / 12.0
+            out[i, 2] = sb_bal * (sb_rate / 100.0) / 12.0
         return out

@@ -179,8 +179,10 @@ export interface Dataset {
   name: string
   description?: string | null
   source_kind: 'upload' | 'sql_table'
+  dataset_role?: 'input' | 'output'
   data_source_id?: string | null
   table_ref?: string | null
+  sql_query?: string | null
   file_path?: string | null
   file_format?: 'csv' | 'parquet' | 'xlsx' | 'xls' | 'json' | null
   columns: DatasetColumn[]

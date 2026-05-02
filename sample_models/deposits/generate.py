@@ -20,7 +20,9 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-from _classes import RDMaaS, CommMaaS, SBBMaaS  # noqa: E402  — sys.path tweak above
+from _classes import (  # noqa: E402  — sys.path tweak above
+    RDMaaS, CommMaaS, SBBMaaS, NIICalculator,
+)
 
 
 def main():
@@ -29,6 +31,7 @@ def main():
         ("rdmaas.pkl", RDMaaS()),
         ("commmaas.pkl", CommMaaS()),
         ("sbbmaas.pkl", SBBMaaS()),
+        ("nii_calculator.pkl", NIICalculator()),
     ]
     for filename, model in artifacts:
         path = HERE / filename

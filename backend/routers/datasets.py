@@ -25,6 +25,8 @@ from models.schemas import (
     DatasetColumn,
     DatasetCreateFromTable,
     DatasetPreview,
+    DraftSqlRequest,
+    DraftSqlResponse,
 )
 from packs import is_pack_visible
 from routers.auth import get_current_user, get_current_user_groups
@@ -69,12 +71,16 @@ def _ingest_pack_datasets() -> None:
                 dest.write_bytes(src.read_bytes())
 
             df = _read_dataframe(dest, ext)
+            role = s.get("dataset_role") or "input"
+            if role not in ("input", "output"):
+                role = "input"
             ds = Dataset(
                 id=s["dataset_id"],
                 function_id=s["function_id"],
                 name=s["name"],
                 description=s["description"],
                 source_kind="upload",
+                dataset_role=role,  # type: ignore[arg-type]
                 file_path=rel,
                 file_format=ext,  # type: ignore[arg-type]
                 columns=_columns_from_df(df),
@@ -228,6 +234,7 @@ async def upload_dataset(
     file: Annotated[UploadFile, File()],
     name: Annotated[str | None, Form()] = None,
     description: Annotated[str | None, Form()] = None,
+    dataset_role: Annotated[str, Form()] = "input",
     _: str = Depends(get_current_user),
 ):
     if not file.filename:
@@ -256,12 +263,14 @@ async def upload_dataset(
     columns = _columns_from_df(df)
     final_name = name or file.filename.rsplit(".", 1)[0]
     now = datetime.utcnow().isoformat() + "Z"
+    role = dataset_role if dataset_role in ("input", "output") else "input"
     ds = Dataset(
         id=dataset_id,
         function_id=function_id,
         name=final_name,
         description=description,
         source_kind="upload",
+        dataset_role=role,  # type: ignore[arg-type]
         file_path=rel_path,
         file_format=fmt,  # type: ignore[arg-type]
         columns=columns,
@@ -278,11 +287,47 @@ async def upload_dataset(
 async def bind_from_table(req: DatasetCreateFromTable, _: str = Depends(get_current_user)):
     if req.data_source_id not in _DATA_SOURCES:
         raise HTTPException(status_code=404, detail="Data source not found")
-    src_tables = SAMPLE_TABLES.get(req.data_source_id, {})
-    if req.table_ref not in src_tables:
-        raise HTTPException(status_code=404, detail=f"Table '{req.table_ref}' not in source")
+    src = _DATA_SOURCES[req.data_source_id]
 
-    columns = [DatasetColumn(name=n, dtype=d) for n, d in src_tables[req.table_ref]]
+    # Normalize the binding shape per source type. The Bind Table modal
+    # ships three flavors:
+    #   • OneLake / Snowflake → SQL-driven. `sql_query` is the contract;
+    #     `table_ref` is a friendly label only.
+    #   • S3                  → path-driven. `table_ref` carries the
+    #     s3:// URL; `sql_query` stays empty.
+    columns: list[DatasetColumn] = []
+    if src.type == "s3":
+        if not req.table_ref:
+            raise HTTPException(
+                status_code=400,
+                detail="S3 datasets require an s3:// URL in `table_ref`.",
+            )
+        binding_ref = req.table_ref
+    elif src.type in ("onelake", "snowflake"):
+        if not req.sql_query and not req.table_ref:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"{src.type.title()} datasets require a SQL query "
+                    "(or a table_ref label)."
+                ),
+            )
+        binding_ref = req.table_ref or "(custom SQL)"
+        # If the legacy fixture still has columns for the table, use them
+        # for the schema preview; otherwise leave empty (discovered at
+        # read time).
+        legacy_cols = SAMPLE_TABLES.get(req.data_source_id, {}).get(req.table_ref or "")
+        if legacy_cols:
+            columns = [DatasetColumn(name=n, dtype=d) for n, d in legacy_cols]
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Cannot bind table from `{src.type}` source — only "
+                "onelake / snowflake / s3 are supported."
+            ),
+        )
+
     dataset_id = f"ds-{uuid.uuid4().hex[:10]}"
     now = datetime.utcnow().isoformat() + "Z"
     ds = Dataset(
@@ -291,8 +336,10 @@ async def bind_from_table(req: DatasetCreateFromTable, _: str = Depends(get_curr
         name=req.name,
         description=req.description,
         source_kind="sql_table",
+        dataset_role=req.dataset_role,
         data_source_id=req.data_source_id,
-        table_ref=req.table_ref,
+        table_ref=binding_ref,
+        sql_query=req.sql_query,
         columns=columns,
         row_count=None,  # unknown until queried
         created_at=now,
@@ -300,6 +347,69 @@ async def bind_from_table(req: DatasetCreateFromTable, _: str = Depends(get_curr
     )
     _DATASETS[dataset_id] = ds
     return ds
+
+
+@router.post("/draft-sql", response_model=DraftSqlResponse)
+async def draft_sql(req: DraftSqlRequest, _: str = Depends(get_current_user)):
+    """Draft a SQL filter for a bound table from a natural-language
+    description. Used by the Bind Table modal's agent box.
+
+    Strategy:
+      1. If the chat orchestrator is configured (OpenAI / COF), ask it
+         to draft a SELECT statement, constraining the answer to use
+         only the columns the table actually has.
+      2. Otherwise, return a sensible boilerplate the analyst can edit.
+    """
+    columns_str = ", ".join(req.columns) if req.columns else "*"
+    prompt = (
+        f"You are a SQL drafter. Generate ONE valid SELECT statement that "
+        f"reads from the table `{req.table_ref}`. The table has columns: "
+        f"{columns_str}. The analyst's request: {req.description!r}. "
+        "Return ONLY the SQL — no markdown, no commentary, no explanation. "
+        "Use only the column names listed above. Use standard SQL syntax."
+    )
+
+    try:
+        from cof.orchestrator import AsyncOrchestrator
+        orch = AsyncOrchestrator()
+        if orch.available:
+            text = await orch.chat_specialist(
+                agent_id="orchestrator",
+                user_message=prompt,
+                extra_context="",
+            )
+            # Strip markdown fences if the model added them despite instructions.
+            sql = text.strip()
+            for fence in ("```sql", "```SQL", "```"):
+                if sql.startswith(fence):
+                    sql = sql[len(fence):].lstrip("\n")
+                    break
+            if sql.endswith("```"):
+                sql = sql[:-3].rstrip()
+            return DraftSqlResponse(sql_query=sql, note="drafted by agent")
+    except Exception as e:
+        log.warning("[draft-sql] orchestrator failed, using stub: %s", e)
+
+    # Stub fallback — boilerplate the analyst can edit. Best-effort
+    # parse of the description for "limit N" and a generic WHERE clause
+    # placeholder.
+    desc_lower = req.description.lower()
+    limit_clause = ""
+    import re
+    m = re.search(r"\blimit\s+(\d+)", desc_lower) or re.search(r"\b(\d+)\s+rows?\b", desc_lower)
+    if m:
+        limit_clause = f"\nLIMIT {m.group(1)}"
+    cols_select = ", ".join(req.columns) if req.columns else "*"
+    sql = (
+        f"SELECT {cols_select}\n"
+        f"FROM {req.table_ref}\n"
+        f"-- TODO: edit the WHERE clause based on: {req.description}"
+        f"{limit_clause}"
+    )
+    return DraftSqlResponse(
+        sql_query=sql,
+        note="agent unavailable — boilerplate drafted (edit the WHERE clause).",
+    )
 
 
 @router.get("/{dataset_id}/preview", response_model=DatasetPreview)

@@ -478,8 +478,17 @@ class Dataset(BaseModel):
     name: str
     description: str | None = None
     source_kind: Literal["upload", "sql_table"]
+    # Where this dataset sits in the workflow lifecycle. `input` = a
+    # source the canvas reads from; `output` = a destination the
+    # workflow writes to. Defaults to `input` so existing datasets keep
+    # their current behavior.
+    dataset_role: Literal["input", "output"] = "input"
     data_source_id: str | None = None
     table_ref: str | None = None
+    # Optional SQL filter applied at read time when the dataset is
+    # backed by a SQL table — e.g. `SELECT * FROM <table_ref> WHERE
+    # as_of_date >= '2026-04-01'`. None = read the whole table.
+    sql_query: str | None = None
     file_path: str | None = None
     file_format: Literal["csv", "parquet", "xlsx", "xls", "json"] | None = None
     columns: list[DatasetColumn] = Field(default_factory=list)
@@ -495,7 +504,26 @@ class DatasetCreateFromTable(BaseModel):
     name: str
     description: str | None = None
     data_source_id: str
+    # For OneLake / Snowflake bindings the SQL query is the binding
+    # contract — `table_ref` is just a friendly label (defaults to the
+    # data-source name + "(custom SQL)" when omitted). For S3 bindings
+    # `table_ref` carries the s3:// URL the workflow reads from.
+    table_ref: str | None = None
+    dataset_role: Literal["input", "output"] = "input"
+    sql_query: str | None = None
+
+
+class DraftSqlRequest(BaseModel):
+    """Ask the agent to draft a SQL filter for a bound table from a
+    natural-language description."""
     table_ref: str
+    description: str
+    columns: list[str] = Field(default_factory=list)
+
+
+class DraftSqlResponse(BaseModel):
+    sql_query: str
+    note: str | None = None  # e.g. "drafted by agent" / "stub fallback"
 
 
 class DatasetPreview(BaseModel):
