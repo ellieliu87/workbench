@@ -673,14 +673,14 @@ async def run_definition(def_id: str, _: str = Depends(get_current_user)):
 
 # ── Agent assist: draft + narrate ─────────────────────────────────────────
 def _llm_client():
-    """Reuse the process-wide shared AsyncOpenAI client. The corporate
-    COF proxy SDK reads its K8s SA token at construction time, so we
-    only want to pay that cost once. See cof/llm_config."""
+    """Match oasia: AsyncOpenAI() with no arguments. The SDK auto-resolves
+    OPENAI_BASE_URL / OPENAI_API_KEY from env; corporate COF proxy
+    environments preconfigure these transparently."""
     try:
-        from cof.llm_config import get_async_client
+        from openai import AsyncOpenAI
     except ImportError:
         raise HTTPException(status_code=503, detail="openai package not installed.")
-    return get_async_client()
+    return AsyncOpenAI()
 
 
 _DRAFT_SYSTEM = """You design self-serve analytics for a domain-agnostic
