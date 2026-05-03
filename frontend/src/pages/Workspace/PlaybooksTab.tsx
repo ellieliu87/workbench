@@ -11,10 +11,14 @@ import {
   ListChecks, Plus, Trash2, X, Play, BookOpen, Save, Download, Send, Sparkles,
   CheckCircle2, AlertCircle, Loader2, ArrowRight, Database, FlaskConical, Type,
   Pencil, Pin, FileText, Wrench, MessageSquare, Brain, ChevronRight, ChevronDown,
-  Settings as SettingsIcon, ExternalLink,
+  Settings as SettingsIcon, ExternalLink, Upload, Paperclip,
 } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import {
+  Bar, BarChart, CartesianGrid, Cell, ResponsiveContainer,
+  Tooltip as RechartsTooltip, XAxis, YAxis,
+} from 'recharts'
 import api from '@/lib/api'
 import type {
   Dataset, Scenario, Playbook, PlaybookPhase, PlaybookPhaseInput, PlaybookRun,
@@ -76,7 +80,7 @@ export default function PlaybooksTab({ functionId, functionName, onAskAgent, onC
     Promise.all([
       api.get<Playbook[]>('/api/playbooks', { params: { function_id: functionId } }),
       api.get<PublishedReport[]>('/api/playbooks/published', { params: { function_id: functionId } }),
-      api.get<PlaybookSkill[]>('/api/playbooks/_skills'),
+      api.get<PlaybookSkill[]>('/api/playbooks/_skills', { params: { function_id: functionId } }),
       api.get<Dataset[]>('/api/datasets', { params: { function_id: functionId } }),
       api.get<Scenario[]>('/api/analytics/scenarios', { params: { function_id: functionId } }),
     ]).then(([pb, pub, sk, ds, sc]) => {
@@ -270,19 +274,50 @@ function PlaybookEditor({
   onRunStarted: (runId: string) => void
 }) {
   const isNew = !playbook
+  // Pre-allocate an id even for "new" playbooks so file uploads can be
+  // scoped under `playbook/<id>/` before the playbook is persisted.
+  // `crypto.randomUUID()` is available in modern browsers; we wrap with
+  // a fallback so legacy environments still work.
+  const newId = useMemo(() => {
+    const u = (typeof crypto !== 'undefined' && (crypto as any).randomUUID)
+      ? (crypto as any).randomUUID().replace(/-/g, '').slice(0, 10)
+      : Math.random().toString(36).slice(2, 12)
+    return `pbk-${u}`
+  }, [])
+  const editingId = playbook?.id || newId
+
   const [name, setName] = useState(playbook?.name || '')
   const [description, setDescription] = useState(playbook?.description || '')
+  const [problemStatement, setProblemStatement] = useState(playbook?.problem_statement || '')
+  const [uploadedFiles, setUploadedFiles] = useState<{ id: string; name: string; size_bytes: number; extension: string }[]>([])
+  const [uploading, setUploading] = useState(false)
   const [phases, setPhases] = useState<PlaybookPhase[]>(playbook?.phases || [])
   const [saving, setSaving] = useState(false)
   const [running, setRunning] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const filesInputRef = useRef<HTMLInputElement | null>(null)
 
   // Reset when switching playbooks
   useEffect(() => {
     setName(playbook?.name || '')
     setDescription(playbook?.description || '')
+    setProblemStatement(playbook?.problem_statement || '')
     setPhases(playbook?.phases || [])
     setError(null)
+    // Refresh file list from documents API — the playbook stores ids
+    // (relative paths) but we want the live size / mtime from disk so
+    // a file deleted out-of-band shows correctly.
+    const ids = new Set(playbook?.uploaded_file_ids || [])
+    if (ids.size === 0) {
+      setUploadedFiles([])
+    } else {
+      api.get<any[]>('/api/documents').then((r) => {
+        setUploadedFiles(r.data
+          .filter((d) => ids.has(d.id))
+          .map((d) => ({ id: d.id, name: d.name, size_bytes: d.size_bytes, extension: d.extension }))
+        )
+      })
+    }
   }, [playbook?.id])
 
   const addPhase = () => {
@@ -321,12 +356,24 @@ function PlaybookEditor({
     })
   }
 
+  const buildBody = () => ({
+    function_id: functionId,
+    name,
+    description,
+    problem_statement: problemStatement,
+    uploaded_file_ids: uploadedFiles.map((f) => f.id),
+    phases,
+    // For new playbooks, send the pre-allocated id so the upload scope
+    // (already in use) matches what gets persisted on the playbook.
+    ...(isNew ? { id: editingId } : {}),
+  })
+
   const save = async () => {
     if (!name) { setError('Name required'); return }
     if (phases.length === 0) { setError('At least one phase required'); return }
     setSaving(true); setError(null)
     try {
-      const body = { function_id: functionId, name, description, phases }
+      const body = buildBody()
       const r = isNew
         ? await api.post<Playbook>('/api/playbooks', body)
         : await api.patch<Playbook>(`/api/playbooks/${playbook!.id}`, body)
@@ -344,7 +391,7 @@ function PlaybookEditor({
     setRunning(true); setError(null)
     try {
       // Auto-save (create or update) so the latest phases run, even if the user hasn't clicked Save.
-      const body = { function_id: functionId, name, description, phases }
+      const body = buildBody()
       const saved = isNew
         ? (await api.post<Playbook>('/api/playbooks', body)).data
         : (await api.patch<Playbook>(`/api/playbooks/${playbook!.id}`, body)).data
@@ -356,6 +403,43 @@ function PlaybookEditor({
     } finally {
       setRunning(false)
     }
+  }
+
+  const onFilesPicked = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || [])
+    if (files.length === 0) return
+    setUploading(true)
+    const added: { id: string; name: string; size_bytes: number; extension: string }[] = []
+    for (const f of files) {
+      const fd = new FormData()
+      fd.append('file', f)
+      fd.append('scope', `playbook/${editingId}`)
+      try {
+        const r = await api.post<{ id: string; name: string; size_bytes: number; extension: string }>(
+          '/api/documents/upload', fd,
+          { headers: { 'Content-Type': 'multipart/form-data' } },
+        )
+        added.push({
+          id: r.data.id, name: r.data.name,
+          size_bytes: r.data.size_bytes, extension: r.data.extension,
+        })
+      } catch (err: any) {
+        setError(`Upload failed for ${f.name}: ${err?.response?.data?.detail || err.message}`)
+      }
+    }
+    if (added.length) setUploadedFiles((prev) => [...prev, ...added])
+    if (filesInputRef.current) filesInputRef.current.value = ''
+    setUploading(false)
+  }
+
+  const removeFile = async (id: string) => {
+    if (!confirm('Remove this file from the playbook?')) return
+    try {
+      await api.delete(`/api/documents/${encodeURIComponent(id)}`)
+    } catch {
+      // Even if the disk delete fails (e.g. already gone), still drop the reference.
+    }
+    setUploadedFiles((prev) => prev.filter((f) => f.id !== id))
   }
 
   const remove = async () => {
@@ -421,6 +505,109 @@ function PlaybookEditor({
             <Play size={12} /> {running ? 'Running…' : 'Run'}
           </button>
         </div>
+      </div>
+
+      {/* ── Problem statement + uploaded files ─────────────────────────── */}
+      <div
+        className="rounded-lg p-3.5 mb-4 mt-3"
+        style={{
+          background: 'linear-gradient(135deg, rgba(0,73,119,0.04), rgba(124,58,237,0.04))',
+          border: '1px solid var(--border)',
+        }}
+      >
+        <div className="flex items-center justify-between gap-3 mb-2">
+          <div className="flex items-center gap-1.5">
+            <Brain size={13} style={{ color: 'var(--accent)' }} />
+            <span
+              className="text-[11px] font-bold uppercase tracking-widest"
+              style={{ color: 'var(--text-secondary)' }}
+            >
+              Problem framing
+            </span>
+          </div>
+          <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
+            Every phase agent will see this as `[PROBLEM STATEMENT]` and can search the attached files via <span className="font-mono">rag_search</span>.
+          </span>
+        </div>
+        <textarea
+          value={problemStatement}
+          onChange={(e) => setProblemStatement(e.target.value)}
+          placeholder="Describe the analytical question this playbook is meant to answer. Be concrete about the decision the analyst is making, the data they have, and what a good answer looks like."
+          rows={4}
+          className="w-full rounded-md p-2.5 text-[13px] resize-y"
+          style={{
+            background: 'var(--bg-elevated)',
+            border: '1px solid var(--border)',
+            color: 'var(--text-primary)',
+            outline: 'none',
+            lineHeight: 1.5,
+          }}
+        />
+
+        <div className="flex items-center justify-between mt-3 mb-1.5">
+          <div className="flex items-center gap-1.5">
+            <Paperclip size={12} style={{ color: 'var(--text-muted)' }} />
+            <span
+              className="text-[10px] font-bold uppercase tracking-widest"
+              style={{ color: 'var(--text-secondary)' }}
+            >
+              Reference files ({uploadedFiles.length})
+            </span>
+          </div>
+          <input
+            ref={filesInputRef}
+            type="file"
+            multiple
+            className="hidden"
+            accept=".md,.txt,.pdf,.docx,.pptx,.py,.csv,.xlsx,.xls,.json"
+            onChange={onFilesPicked}
+          />
+          <button
+            onClick={() => filesInputRef.current?.click()}
+            disabled={uploading}
+            className="px-2.5 py-1 rounded-md text-[11px] font-semibold flex items-center gap-1 disabled:opacity-50"
+            style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', color: 'var(--text-secondary)' }}
+          >
+            <Upload size={10} /> {uploading ? 'Uploading…' : 'Attach files'}
+          </button>
+        </div>
+
+        {uploadedFiles.length === 0 ? (
+          <div
+            className="text-[11px] rounded-md px-3 py-2"
+            style={{ background: 'var(--bg-card)', color: 'var(--text-muted)', border: '1px dashed var(--border)' }}
+          >
+            No reference files yet. Drop in whitepapers, decks, prior memos, or code — the agent will rag_search them as needed.
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+            {uploadedFiles.map((f) => (
+              <div
+                key={f.id}
+                className="flex items-center gap-2 rounded-md px-2.5 py-1.5"
+                style={{ background: 'var(--bg-card)', border: '1px solid var(--border)' }}
+              >
+                <FileText size={12} style={{ color: 'var(--accent)' }} />
+                <div className="min-w-0 flex-1">
+                  <div className="text-[12px] font-mono truncate" title={f.id} style={{ color: 'var(--text-primary)' }}>
+                    {f.name}
+                  </div>
+                  <div className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
+                    {f.extension.replace('.', '').toUpperCase()} · {(f.size_bytes / 1024).toFixed(1)} KB
+                  </div>
+                </div>
+                <button
+                  onClick={() => removeFile(f.id)}
+                  className="p-1 rounded"
+                  style={{ color: 'var(--text-muted)' }}
+                  title="Remove file"
+                >
+                  <X size={11} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="space-y-3 mt-2">
@@ -494,6 +681,10 @@ function PhaseEditor({
   onMoveDown?: () => void
 }) {
   const [showAddInput, setShowAddInput] = useState(false)
+  // Hide the optional instructions textarea by default; auto-expand if
+  // the phase already carries instructions (so re-opening an existing
+  // playbook doesn't visually drop the configured prompt).
+  const [showInstructions, setShowInstructions] = useState(!!(phase.instructions && phase.instructions.trim()))
   const earlierPhases = allPhases.slice(0, idx)
 
   const addInput = (kind: PlaybookPhaseInput['kind'], ref?: string, text?: string) => {
@@ -609,13 +800,43 @@ function PhaseEditor({
             </div>
           </div>
 
-          <textarea
-            value={phase.instructions || ''}
-            onChange={(e) => onChange({ instructions: e.target.value })}
-            placeholder="Instructions to the agent (overrides default user message). Optional."
-            rows={2}
-            className="phase-input resize-none"
-          />
+          {showInstructions ? (
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <span
+                  className="text-[10px] font-semibold uppercase tracking-widest"
+                  style={{ color: 'var(--text-secondary)' }}
+                >
+                  Instructions (optional)
+                </span>
+                <button
+                  onClick={() => setShowInstructions(false)}
+                  className="text-[10px]"
+                  style={{ color: 'var(--text-muted)' }}
+                  title="Hide instructions"
+                >
+                  hide
+                </button>
+              </div>
+              <textarea
+                value={phase.instructions || ''}
+                onChange={(e) => onChange({ instructions: e.target.value })}
+                placeholder="Override the default user message sent to the agent."
+                rows={2}
+                className="phase-input resize-none"
+                autoFocus
+              />
+            </div>
+          ) : (
+            <button
+              onClick={() => setShowInstructions(true)}
+              className="text-[10px] flex items-center gap-1"
+              style={{ color: 'var(--text-muted)', fontWeight: 600 }}
+              title="Add custom instructions to override the default user message"
+            >
+              <Plus size={10} /> add custom instructions (optional)
+            </button>
+          )}
 
           <div className="mt-2">
             <div className="flex items-center justify-between mb-1">
@@ -964,9 +1185,15 @@ ${markdownToHTML(md)}
           <div className="section-title">Final Report</div>
           <div
             className="panel"
-            style={{ padding: 18 }}
+            style={{
+              padding: '32px 36px',
+              background: '#FFFFFF',
+              border: '1px solid var(--border)',
+              boxShadow: '0 1px 3px rgba(0,0,0,0.04)',
+              borderRadius: 8,
+            }}
           >
-            <MarkdownBody md={run.final_report} />
+            <MarkdownBody md={run.final_report} variant="report" />
           </div>
 
           {run.status === 'completed' && (
@@ -1038,7 +1265,10 @@ function RunStatusBanner({ run }: { run: PlaybookRun }) {
 
 // ── Agent reasoning trace ─────────────────────────────────────────────
 function TracePanel({ trace }: { trace: TraceStep[] }) {
-  const [collapsed, setCollapsed] = useState(false)
+  // Collapsed by default — analysts mostly want the output, not the trace.
+  // They click the header to expand when they want to verify how the
+  // agent reached its answer.
+  const [collapsed, setCollapsed] = useState(true)
   const [openSteps, setOpenSteps] = useState<Record<number, boolean>>({})
 
   const toolCalls = trace.filter((s) => s.kind === 'tool_call').length
@@ -1336,11 +1566,203 @@ function ReportView({ report, onClose }: { report: PublishedReport; onClose: () 
   )
 }
 
-// ── shared markdown renderer with consistent styling ─────────────────
-function MarkdownBody({ md }: { md: string }) {
+// ── Waterfall chart for variance walks ───────────────────────────────
+// Commentary-drafter emits ```waterfall fenced blocks; we render them
+// as a Recharts BarChart with a running balance.
+type WaterfallSpec = {
+  title?: string
+  current_label?: string
+  benchmark_label?: string
+  metric?: string
+  starting_point_mm?: number
+  components?: { label: string; value_mm: number }[]
+  total_mm?: number
+}
+
+function WaterfallChart({ spec }: { spec: WaterfallSpec }) {
+  // Build cumulative bars: each component is plotted from `running` to
+  // `running + value`. We feed Recharts two series — `base` (transparent
+  // pad to lift the floating bar) and `delta` (the actual bar value
+  // styled by sign).
+  const start = spec.starting_point_mm ?? 0
+  const components = spec.components || []
+  const total = spec.total_mm ?? (start + components.reduce((s, c) => s + (c.value_mm || 0), 0))
+
+  const rows: { label: string; base: number; delta: number; sign: 'up' | 'down' | 'total' }[] = []
+  let running = 0
+  rows.push({ label: 'Starting point', base: 0, delta: start, sign: start >= 0 ? 'up' : 'down' })
+  running = start
+  for (const c of components) {
+    const v = c.value_mm || 0
+    const base = v >= 0 ? running : running + v
+    rows.push({ label: c.label, base, delta: Math.abs(v), sign: v >= 0 ? 'up' : 'down' })
+    running += v
+  }
+  rows.push({ label: 'Total', base: 0, delta: total, sign: 'total' })
+
+  const fmt = (mm: number) => {
+    const abs = Math.abs(mm)
+    if (abs >= 1000) return `${(mm / 1000).toFixed(2)}B`
+    return `${mm.toFixed(0)}M`
+  }
+
+  const COLORS = { up: '#059669', down: '#DC2626', total: '#1E3A8A' }
+
   return (
-    <div style={{ fontSize: 13, lineHeight: 1.65, color: 'var(--text-primary)' }}>
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{md}</ReactMarkdown>
+    <div
+      className="rounded-lg my-3"
+      style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', padding: 14 }}
+    >
+      <div className="flex items-baseline justify-between mb-2 gap-3 flex-wrap">
+        <div
+          className="text-[12px] font-bold uppercase tracking-widest"
+          style={{ color: 'var(--text-secondary)' }}
+        >
+          {spec.title || 'Variance walk'}
+        </div>
+        {(spec.current_label || spec.benchmark_label) && (
+          <div className="text-[10px] font-mono" style={{ color: 'var(--text-muted)' }}>
+            {spec.current_label} vs {spec.benchmark_label}
+            {spec.metric ? ` · ${spec.metric}` : ''}
+          </div>
+        )}
+      </div>
+      <ResponsiveContainer width="100%" height={260}>
+        <BarChart data={rows} margin={{ top: 16, right: 16, left: -8, bottom: 0 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="var(--border-subtle)" />
+          <XAxis dataKey="label" tick={{ fontSize: 11, fill: 'var(--text-muted)' }} />
+          <YAxis tick={{ fontSize: 11, fill: 'var(--text-muted)' }} tickFormatter={fmt} />
+          <RechartsTooltip
+            contentStyle={{
+              background: 'var(--bg-card)', border: '1px solid var(--border)',
+              borderRadius: 8, fontSize: 11, fontFamily: 'JetBrains Mono, monospace',
+            }}
+            formatter={(v: any, _name: any, p: any) => {
+              const r = rows[p?.payload?.__index ?? 0]
+              const signed = r?.sign === 'down' ? -Math.abs(v as number) : (v as number)
+              return [fmt(signed), r?.label]
+            }}
+          />
+          <Bar dataKey="base" stackId="w" fill="transparent" />
+          <Bar
+            dataKey="delta"
+            stackId="w"
+            label={{ position: 'top', fontSize: 10, formatter: (v: any) => fmt(v) }}
+          >
+            {rows.map((r, i) => (
+              <Cell key={i} fill={COLORS[r.sign]} />
+            ))}
+          </Bar>
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
+  )
+}
+
+// ── shared markdown renderer with consistent styling ─────────────────
+// `variant="report"` switches to the regulator-grade typography used
+// for the final-report block.
+function MarkdownBody({ md, variant = 'phase' }: { md: string; variant?: 'phase' | 'report' }) {
+  // Strip + extract waterfall fenced blocks before passing to ReactMarkdown.
+  const segments: ({ kind: 'md'; text: string } | { kind: 'waterfall'; spec: WaterfallSpec })[] = []
+  const re = /```waterfall\n([\s\S]*?)```/g
+  let cursor = 0
+  let m: RegExpExecArray | null
+  while ((m = re.exec(md)) !== null) {
+    if (m.index > cursor) segments.push({ kind: 'md', text: md.slice(cursor, m.index) })
+    try {
+      const spec = JSON.parse(m[1]) as WaterfallSpec
+      segments.push({ kind: 'waterfall', spec })
+    } catch {
+      // Malformed JSON inside the fence — fall back to rendering the raw block.
+      segments.push({ kind: 'md', text: m[0] })
+    }
+    cursor = m.index + m[0].length
+  }
+  if (cursor < md.length) segments.push({ kind: 'md', text: md.slice(cursor) })
+
+  const wrapperClass = variant === 'report' ? 'cma-md cma-md-report' : 'cma-md'
+  return (
+    <div className={wrapperClass}>
+      {segments.map((s, i) => s.kind === 'waterfall'
+        ? <WaterfallChart key={i} spec={s.spec} />
+        : <ReactMarkdown key={i} remarkPlugins={[remarkGfm]}>{s.text}</ReactMarkdown>
+      )}
+      <style>{`
+        .cma-md {
+          font-size: 13px; line-height: 1.65; color: var(--text-primary);
+          overflow-wrap: break-word; word-break: break-word;
+        }
+        .cma-md p { margin: 0 0 0.75em; }
+        .cma-md h1, .cma-md h2, .cma-md h3, .cma-md h4 {
+          color: var(--text-primary); font-weight: 700;
+          margin: 1.1em 0 0.5em; line-height: 1.25;
+        }
+        .cma-md h1 { font-size: 1.45em; border-bottom: 1px solid var(--border); padding-bottom: 0.25em; }
+        .cma-md h2 { font-size: 1.22em; }
+        .cma-md h3 { font-size: 1.05em; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.04em; }
+        .cma-md h4 { font-size: 0.95em; color: var(--text-secondary); }
+        .cma-md ul, .cma-md ol { margin: 0 0 0.75em 1.4em; }
+        .cma-md li { margin: 0.2em 0; }
+        .cma-md strong { color: var(--text-primary); }
+        .cma-md code {
+          background: var(--bg-elevated); padding: 1px 5px; border-radius: 4px;
+          font-size: 0.92em; font-family: 'JetBrains Mono', monospace;
+        }
+        .cma-md pre {
+          background: var(--bg-elevated); border: 1px solid var(--border);
+          border-radius: 8px; padding: 10px 12px; margin: 0.75em 0;
+          overflow-x: auto; font-size: 12px; line-height: 1.45;
+          white-space: pre; max-width: 100%;
+        }
+        .cma-md pre code { background: transparent; padding: 0; }
+        .cma-md table {
+          display: block; overflow-x: auto; max-width: 100%;
+          border-collapse: collapse; margin: 0.75em 0; font-size: 0.95em;
+        }
+        .cma-md th, .cma-md td {
+          border: 1px solid var(--border); padding: 6px 10px; text-align: left;
+        }
+        .cma-md thead { background: var(--bg-elevated); }
+        .cma-md blockquote {
+          border-left: 3px solid var(--accent); padding: 0.4em 0.8em;
+          margin: 0.6em 0; color: var(--text-secondary); background: var(--bg-elevated);
+          border-radius: 0 6px 6px 0;
+        }
+
+        /* ── Regulator-grade variant for the Final Report ─────────────── */
+        .cma-md-report {
+          font-family: 'Source Serif Pro', Georgia, 'Times New Roman', serif;
+          font-size: 14.5px; line-height: 1.72; color: var(--text-primary);
+          max-width: 78ch; margin: 0 auto; padding: 0 4px;
+        }
+        .cma-md-report h1 {
+          font-family: 'Source Serif Pro', Georgia, serif;
+          font-size: 1.7em; font-weight: 800; letter-spacing: -0.01em;
+          border-bottom: 2px solid var(--text-primary); padding-bottom: 0.35em;
+          margin: 0 0 0.6em;
+        }
+        .cma-md-report h2 {
+          font-family: 'Source Serif Pro', Georgia, serif;
+          font-size: 1.28em; font-weight: 700;
+          border-bottom: 1px solid var(--border); padding-bottom: 0.2em;
+          margin-top: 1.6em;
+        }
+        .cma-md-report h3 {
+          font-family: 'Source Serif Pro', Georgia, serif;
+          font-size: 1.05em; font-weight: 700; text-transform: none;
+          letter-spacing: 0; color: var(--text-primary);
+          margin-top: 1.3em;
+        }
+        .cma-md-report p { text-align: justify; hyphens: auto; }
+        .cma-md-report blockquote {
+          font-style: italic; background: transparent;
+          border-left-width: 4px; border-left-color: var(--accent);
+        }
+        .cma-md-report table {
+          font-family: 'JetBrains Mono', monospace; font-size: 12px;
+        }
+      `}</style>
     </div>
   )
 }

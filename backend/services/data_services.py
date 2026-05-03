@@ -60,6 +60,17 @@ class ServiceCard:
     icon: str           # lucide-react icon name (frontend resolves)
     tag: str
     agent_prompt: str
+    # Optional bindings the frontend uses to deep-link a card to the
+    # right backend entity:
+    #   transform_id  — Data Harness / DQC cards point at a Transform in
+    #                   `_TRANSFORMS` so the chat panel can bind
+    #                   entity_kind=transform and `get_transform_recipe`
+    #                   reads the actual recipe.
+    #   scenario_id   — CCAR / Outlook cards point at a Scenario in
+    #                   `_SCENARIOS` so the Preview button can pull
+    #                   `/api/analytics/scenarios/{id}/preview`.
+    transform_id: str | None = None
+    scenario_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -83,6 +94,12 @@ _STATIC_PREDICTIVE_CARDS: list[ServiceCard] = [
             "Explain how the Data Harness ETL works — what raw tables it reads from, "
             "what transforms it applies, and what shape it materializes."
         ),
+        # Bound to the deposits-pack Data Harness transform so the chat
+        # panel can route to transform-explainer with a real recipe to
+        # read. If the deposits pack isn't installed for the function
+        # the user's on, the agent will surface a "transform not found"
+        # error and the analyst can pick a different one.
+        transform_id="tr-deposits-data-harness",
     ),
     ServiceCard(
         id="data-quality-check",
@@ -100,6 +117,7 @@ _STATIC_PREDICTIVE_CARDS: list[ServiceCard] = [
             "Walk me through the Data Quality Check service — which checks run, "
             "where they fire in the workflow, and how to extend them."
         ),
+        transform_id="tr-deposits-dqc",
     ),
 ]
 
@@ -154,8 +172,9 @@ def _ccar_card(year: str, row: dict[str, Any]) -> ServiceCard:
     severity = str(row.get("severity", "base"))
     source   = str(row.get("source", "BHC"))
     color    = _SEVERITY_COLOR.get(severity, "#059669")
+    sid = f"ccar-{code.lower()}-{year}"
     return ServiceCard(
-        id=f"ccar-{code.lower()}-{year}",
+        id=sid,
         title=code,
         subtitle=f"{label} · {'Federal Reserve supervisory' if source == 'Fed' else 'BHC internal'}",
         description=str(row["description"]),
@@ -167,6 +186,7 @@ def _ccar_card(year: str, row: dict[str, Any]) -> ServiceCard:
             f"regime, rate path, credit/spreads, real economy, and key tail risks. "
             f"Severity: {severity}."
         ),
+        scenario_id=sid,
     )
 
 
@@ -192,6 +212,7 @@ _STATIC_OUTLOOK_CARDS: list[ServiceCard] = [
             "Explain the bank's internal Interest Rate Outlook — current view on "
             "Fed path, term premium, and the key swing factors for the next 12 months."
         ),
+        scenario_id="outlook-ir",
     ),
 ]
 
@@ -348,9 +369,11 @@ def _load_outlook_cards() -> list[ServiceCard]:
         return list(_STATIC_OUTLOOK_CARDS)
     try:
         rows = _onelake_read_table(ONELAKE_OUTLOOK_TABLE)
-        cards = [
-            ServiceCard(
-                id=str(r.get("id") or f"outlook-{i}"),
+        cards = []
+        for i, r in enumerate(rows):
+            sid = str(r.get("id") or f"outlook-{i}")
+            cards.append(ServiceCard(
+                id=sid,
                 title=str(r["title"]),
                 subtitle=str(r.get("subtitle", "Treasury · outlook")),
                 description=str(r["description"]),
@@ -361,9 +384,8 @@ def _load_outlook_cards() -> list[ServiceCard]:
                     f"Explain the \"{r['title']}\" outlook scenario — drivers, central "
                     "case, and key swing factors."
                 )),
-            )
-            for i, r in enumerate(rows)
-        ]
+                scenario_id=sid,
+            ))
         return cards or list(_STATIC_OUTLOOK_CARDS)
     except Exception:
         log.exception(

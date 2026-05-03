@@ -39,7 +39,11 @@ from cof.base_agent import CofBaseAgent, HAS_AGENTS_SDK
 log = logging.getLogger("cma.cof.orchestrator")
 
 
-_DELEGATE_AGENT_NAMES = [
+# Fallback delegate list — only consulted when the orchestrator skill on
+# disk doesn't declare a `sub_agents:` block. The canonical source is the
+# orchestrator skill's frontmatter (so packs can extend the list by
+# editing one markdown file rather than this code).
+_DEFAULT_DELEGATE_AGENT_NAMES = [
     "kpi-explainer",
     "data-quality",
     "model-explainer",
@@ -159,12 +163,14 @@ class AsyncOrchestrator:
 
     def _reload_skills(self) -> None:
         """Re-read every skill from disk; rebuild agents."""
-        from agents import Agent, OpenAIChatCompletionsModel
+        from agents import OpenAIChatCompletionsModel
         from openai import AsyncOpenAI
 
         self._skills: dict[str, AgentSkill] = {
             _norm(s.name): s for s in load_all_skills().values()
         }
+        # Per-function orchestrator Agent cache, invalidated on every reload.
+        self._orch_agent_by_fn: dict[str, Any] = {}
 
         # Build a specialist for every loaded skill (except the orchestrator
         # itself). Playbook phases call these by skill_name via chat_specialist,
@@ -177,16 +183,22 @@ class AsyncOrchestrator:
             short_name = skill.name  # canonical kebab-case name from the skill file
             self._sub_agents[short_name] = CofBaseAgent(skill, OPENAI_TOOLS, handle_tool_call)
 
-        # Warn about any curated-delegate skills that are missing from disk.
-        for short_name in _DELEGATE_AGENT_NAMES:
-            if short_name not in self._sub_agents:
-                log.warning("Delegate skill not found: %s", short_name)
-
         # Build orchestrator agent
         orch_skill = self._skills.get("orchestrator")
         if not orch_skill:
-            self._orch_agent = None
+            self._orch_skill = None
             return
+
+        # Canonical delegate pool comes from the orchestrator skill's
+        # `sub_agents:` frontmatter (so adding a pack-scoped delegate is a
+        # one-line edit to orchestrator.md, not a code change). Fall back to
+        # the legacy list if the skill on disk has no sub_agents block.
+        self._delegate_pool_names: list[str] = list(orch_skill.sub_agents) or list(
+            _DEFAULT_DELEGATE_AGENT_NAMES
+        )
+        for short_name in self._delegate_pool_names:
+            if short_name not in self._sub_agents:
+                log.warning("Delegate skill not found: %s", short_name)
 
         # Match oasia exactly: AsyncOpenAI() with no arguments. The openai
         # SDK auto-discovers `OPENAI_BASE_URL` / `OPENAI_API_KEY` from the
@@ -197,15 +209,6 @@ class AsyncOrchestrator:
         self._client = AsyncOpenAI()
         self._orch_model = OpenAIChatCompletionsModel(
             model=orch_skill.model, openai_client=self._client,
-        )
-        delegate_pool = {
-            n: self._sub_agents[n] for n in _DELEGATE_AGENT_NAMES if n in self._sub_agents
-        }
-        self._orch_agent = Agent(
-            name="orchestrator",
-            instructions=orch_skill.system_prompt,
-            model=self._orch_model,
-            tools=_build_delegate_tools(delegate_pool, self._skills),
         )
         self._orch_skill = orch_skill
         # Record the mtime snapshot so _maybe_reload skips work until something changes.
@@ -229,16 +232,81 @@ class AsyncOrchestrator:
         self._maybe_reload()
         return self._skills.get(_norm(agent_id))
 
+    # ── Function-scoped delegate filtering ───────────────────────────────
+    def _delegate_pool_for_function(
+        self, function_id: str | None
+    ) -> dict[str, CofBaseAgent]:
+        """Return the subset of delegates visible from `function_id`.
+
+        Visibility rules:
+          - Built-in skills (source='builtin') and user uploads ('user')
+            are always in scope — they don't belong to any pack.
+          - Pack skills (source='pack') are in scope only if the pack
+            declares `attach_to_functions=[]` (universal) or includes
+            `function_id` in that list.
+          - When `function_id` is None/empty (e.g. user is on the home
+            page), every loaded delegate is in scope — there's no
+            workspace context to scope against.
+        """
+        from packs import get_pack
+
+        pool: dict[str, CofBaseAgent] = {}
+        for name in self._delegate_pool_names:
+            agent = self._sub_agents.get(name)
+            if not agent:
+                continue
+            skill = self._skills.get(_norm(name))
+            if not skill or skill.source != "pack" or not skill.pack_id:
+                pool[name] = agent
+                continue
+            # Pack skill — gate on attach_to_functions (only when we have
+            # a function_id to scope by).
+            if not function_id:
+                pool[name] = agent
+                continue
+            pack = get_pack(skill.pack_id)
+            attach = list(pack.attach_to_functions) if pack else []
+            if not attach or function_id in attach:
+                pool[name] = agent
+        return pool
+
+    def _build_orchestrator_agent(self, function_id: str | None):
+        """Build (or fetch from cache) the orchestrator Agent for a given
+        function_id. Cache is keyed by function_id and reset whenever
+        skills reload."""
+        from agents import Agent
+
+        cache_key = function_id or "__no_function__"
+        if cache_key in self._orch_agent_by_fn:
+            return self._orch_agent_by_fn[cache_key]
+        pool = self._delegate_pool_for_function(function_id)
+        agent = Agent(
+            name="orchestrator",
+            instructions=self._orch_skill.system_prompt,
+            model=self._orch_model,
+            tools=_build_delegate_tools(pool, self._skills),
+        )
+        self._orch_agent_by_fn[cache_key] = agent
+        return agent
+
     async def chat_orchestrator(
         self,
         user_message: str,
         extra_context: str = "",
         history: list[dict] | None = None,
+        function_id: str | None = None,
     ) -> str:
-        """Run the orchestrator (router) agent — it picks specialists via delegate tools."""
+        """Run the orchestrator (router) agent — it picks specialists via delegate tools.
+
+        Delegates are filtered by `function_id` so a user on the Capital
+        Planning workspace doesn't get portfolio-pack agents in the pool.
+        """
         if not self._available:
             raise RuntimeError(self._error or "Orchestrator unavailable")
         self._maybe_reload()
+        if not getattr(self, "_orch_skill", None):
+            raise RuntimeError("Orchestrator skill not loaded")
+        agent = self._build_orchestrator_agent(function_id)
         from agents import Runner
         try:
             messages = []
@@ -251,7 +319,7 @@ class AsyncOrchestrator:
                     messages.append({"role": role, "content": content})
             messages.append({"role": "user", "content": user_message})
             result = await Runner.run(
-                starting_agent=self._orch_agent,
+                starting_agent=agent,
                 input=messages,
                 max_turns=12,
             )

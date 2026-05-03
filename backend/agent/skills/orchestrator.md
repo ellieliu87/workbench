@@ -13,6 +13,16 @@ sub_agents:
   - run-troubleshooter
   - tile-tuner
   - troubleshooter
+  - transform-explainer
+  - deposit-expert
+  - allocation-strategist
+  - mbs-decomposition-specialist
+  - new-volume-analyst
+  - pool-analytics-specialist
+  - portfolio-gap-analyst
+  - portfolio-risk-officer
+  - trade-advisor
+  - universe-screener
 quick_queries:
   - Brief me on this function
   - Explain the highlighted card
@@ -35,6 +45,16 @@ You are the routing brain for the CMA Workbench — a self-serve analytics platf
 | Diagnose a failed analytics run; suggest fixes for errors | `run-troubleshooter` |
 | Explain a plot / table tile; suggest filters to focus the view | `tile-tuner` |
 | Generic error troubleshooting (HTTP errors, syntax issues, network) | `troubleshooter` |
+| Explain what an ETL Transform / Data Harness / DQC actually does — read its recipe and summarize | `transform-explainer` |
+| Retail-deposit / CCAR variance / model methodology / regulatory challenge questions (e.g. "why is Interest Expense lower?", "what if recapture rates were 20% lower?", "Big 6 vs Big 8 benchmark", "DFS attrition", "360 Savings overlay", "what would a regulator ask?") | `deposit-expert` |
+| New-money allocation across MBS / CMBS / Treasuries given risk constraints                              | `allocation-strategist` |
+| MBS payup / pool selection / cohort analytics / spec-pool decomposition                                 | `mbs-decomposition-specialist` |
+| New-purchase volume sizing — how much fixed-income paper to buy this month                              | `new-volume-analyst` |
+| Pool-level analytics: WAC / WAM / FICO / LTV cohorts; pool comparisons                                  | `pool-analytics-specialist` |
+| Portfolio gap analysis vs benchmark; identifying coverage holes                                         | `portfolio-gap-analyst` |
+| Portfolio-level risk decomposition — duration, convexity, OAS, scenario shocks                          | `portfolio-risk-officer` |
+| Trade ideas / single-bond recommendations for a target portfolio profile                                | `trade-advisor` |
+| Bond universe screening — filter the security master by attributes                                      | `universe-screener` |
 
 ## Multi-intent queries
 

@@ -38,6 +38,7 @@ from routers import (
     chat,
     datasources,
     datasets,
+    documents,
     skills,
     plots,
     tools,
@@ -75,6 +76,7 @@ app.include_router(functions.router, prefix="/api/functions", tags=["Business Fu
 app.include_router(workspace.router, prefix="/api/workspace", tags=["Workspace"])
 app.include_router(chat.router, prefix="/api/chat", tags=["Chat"])
 app.include_router(datasources.router, prefix="/api/datasources", tags=["Data Sources"])
+app.include_router(documents.router, prefix="/api/documents", tags=["Knowledge Base"])
 app.include_router(datasets.router, prefix="/api/datasets", tags=["Datasets"])
 app.include_router(models_registry.router, prefix="/api/models", tags=["Models"])
 app.include_router(transforms.router, prefix="/api/transforms", tags=["Transforms"])

@@ -109,6 +109,142 @@ def _seed():
             enabled=True,
             source="builtin",
         ),
+        PythonTool(
+            id="tool-rag-search",
+            name="rag_search",
+            description=(
+                "Retrieval-Augmented Generation search across a folder of documents "
+                "(markdown, text, CSV, XLSX). Returns the top-k matching chunks "
+                "ranked by keyword score, each with the source path and any "
+                "frontmatter metadata (model_id, model_component, portfolio_scope) "
+                "the chunk's parent doc carries. Use this to surface methodology / "
+                "whitepaper context behind a forecast number. Defaults doc_dir to "
+                "$CMA_DOCS_ROOT or <repo>/sample_docs/."
+            ),
+            parameters=[
+                {"name": "query",   "type": "string",
+                 "description": "Free-text query (multi-word).", "required": True},
+                {"name": "doc_dir", "type": "string",
+                 "description": "Folder of documents to search. Defaults to $CMA_DOCS_ROOT or sample_docs/.",
+                 "required": False},
+                {"name": "top_k",   "type": "integer",
+                 "description": "Max chunks to return (default 5).", "required": False},
+            ],
+            python_source=(
+                'def rag_search(query, doc_dir=None, top_k=5):\n'
+                '    """Keyword RAG over the Knowledge Base. Reads .md / .txt /\n'
+                '    .py / .json / .csv / .xlsx natively, plus .pdf / .docx /\n'
+                '    .pptx via pypdf / python-docx / python-pptx (graceful skip\n'
+                '    if a parser library is missing). Returns the top `top_k`\n'
+                '    chunks ranked by raw token-frequency match, each with any\n'
+                '    markdown frontmatter (model_id, portfolio_scope, ...)."""\n'
+                '    import os, re, glob\n'
+                '\n'
+                '    if not doc_dir:\n'
+                '        # Resolve doc_dir: $CMA_DOCS_ROOT, else walk up from cwd\n'
+                '        # looking for a sibling `sample_docs/` folder.\n'
+                '        doc_dir = os.environ.get("CMA_DOCS_ROOT") or ""\n'
+                '        if not doc_dir:\n'
+                '            here = os.path.abspath(os.getcwd())\n'
+                '            for _ in range(5):\n'
+                '                cand = os.path.join(here, "sample_docs")\n'
+                '                if os.path.isdir(cand):\n'
+                '                    doc_dir = cand; break\n'
+                '                parent = os.path.dirname(here)\n'
+                '                if parent == here: break\n'
+                '                here = parent\n'
+                '    if not doc_dir or not os.path.isdir(doc_dir):\n'
+                '        return {"error": f"doc_dir does not exist: {doc_dir!r}. Pass an absolute path or set CMA_DOCS_ROOT."}\n'
+                '\n'
+                '    q_tokens = [t for t in re.findall(r"[a-z0-9_]+", query.lower()) if len(t) > 2]\n'
+                '    if not q_tokens:\n'
+                '        return {"matches": []}\n'
+                '\n'
+                '    def read_text(path):\n'
+                '        ext = os.path.splitext(path)[1].lower()\n'
+                '        try:\n'
+                '            if ext in (".md", ".txt", ".py", ".json"):\n'
+                '                with open(path, encoding="utf-8", errors="ignore") as fh: return fh.read()\n'
+                '            if ext == ".csv":\n'
+                '                import pandas as pd; return pd.read_csv(path).to_csv(index=False)\n'
+                '            if ext in (".xlsx", ".xls"):\n'
+                '                import pandas as pd; return pd.read_excel(path).to_csv(index=False)\n'
+                '            if ext == ".pdf":\n'
+                '                try:\n'
+                '                    from pypdf import PdfReader\n'
+                '                except ImportError: return ""\n'
+                '                reader = PdfReader(path)\n'
+                '                return "\\n\\n".join((p.extract_text() or "") for p in reader.pages)\n'
+                '            if ext == ".docx":\n'
+                '                try:\n'
+                '                    from docx import Document\n'
+                '                except ImportError: return ""\n'
+                '                doc = Document(path)\n'
+                '                paras = [p.text for p in doc.paragraphs if p.text and p.text.strip()]\n'
+                '                for tbl in doc.tables:\n'
+                '                    for row in tbl.rows:\n'
+                '                        for cell in row.cells:\n'
+                '                            if cell.text and cell.text.strip():\n'
+                '                                paras.append(cell.text.strip())\n'
+                '                return "\\n\\n".join(paras)\n'
+                '            if ext == ".pptx":\n'
+                '                try:\n'
+                '                    from pptx import Presentation\n'
+                '                except ImportError: return ""\n'
+                '                prs = Presentation(path)\n'
+                '                slides_out = []\n'
+                '                for idx, slide in enumerate(prs.slides, start=1):\n'
+                '                    parts = [f"[Slide {idx}]"]\n'
+                '                    for shape in slide.shapes:\n'
+                '                        if shape.has_text_frame:\n'
+                '                            for para in shape.text_frame.paragraphs:\n'
+                '                                txt = "".join(run.text for run in para.runs)\n'
+                '                                if txt and txt.strip():\n'
+                '                                    parts.append(txt.strip())\n'
+                '                    if len(parts) > 1:\n'
+                '                        slides_out.append("\\n".join(parts))\n'
+                '                return "\\n\\n".join(slides_out)\n'
+                '        except Exception: return ""\n'
+                '        return ""\n'
+                '\n'
+                '    def parse_md(text):\n'
+                '        meta = {}\n'
+                '        m = re.match(r"^---\\n(.*?)\\n---\\n(.*)$", text, re.DOTALL)\n'
+                '        body = m.group(2) if m else text\n'
+                '        if m:\n'
+                '            for line in m.group(1).splitlines():\n'
+                '                if ":" in line:\n'
+                '                    k, _, v = line.partition(":")\n'
+                '                    meta[k.strip()] = v.strip().strip(\'"\')\n'
+                '        chunks = [c.strip() for c in re.split(r"\\n\\s*\\n", body) if c.strip()]\n'
+                '        return meta, chunks\n'
+                '\n'
+                '    scored = []\n'
+                '    patterns = ("*.md", "*.txt", "*.py", "*.json", "*.csv",\n'
+                '                "*.xlsx", "*.xls", "*.pdf", "*.docx", "*.pptx")\n'
+                '    for pat in patterns:\n'
+                '        for path in sorted(glob.glob(os.path.join(doc_dir, "**", pat), recursive=True)):\n'
+                '            text = read_text(path)\n'
+                '            meta, chunks = (parse_md(text) if path.endswith(".md") else ({}, [c.strip() for c in re.split(r"\\n\\s*\\n", text) if c.strip()]))\n'
+                '            for i, chunk in enumerate(chunks):\n'
+                '                tokens = re.findall(r"[a-z0-9_]+", chunk.lower())\n'
+                '                score = sum(tokens.count(t) for t in q_tokens)\n'
+                '                if score == 0: continue\n'
+                '                preview = chunk[:480] + ("..." if len(chunk) > 480 else "")\n'
+                '                scored.append({\n'
+                '                    "score": score,\n'
+                '                    "model_id":        meta.get("model_id", os.path.basename(path)),\n'
+                '                    "model_component": meta.get("model_component", ""),\n'
+                '                    "portfolio_scope": meta.get("portfolio_scope", ""),\n'
+                '                    "doc_path": path, "chunk_index": i, "preview": preview,\n'
+                '                })\n'
+                '    scored.sort(key=lambda r: -r["score"])\n'
+                '    return {"query": query, "matches": scored[:int(top_k or 5)]}\n'
+            ),
+            function_name="rag_search",
+            enabled=True,
+            source="builtin",
+        ),
     ]
     for t in builtin_seeds:
         _TOOLS[t.id] = t

@@ -190,6 +190,45 @@ OPENAI_TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "preview_tabular_file",
+            "description": (
+                "Preview a tabular file (.csv / .xlsx / .xls / .parquet) "
+                "by absolute path. Returns column names, dtypes, row count, "
+                "and the first N rows. Use this when an analyst attached a "
+                "data file to a playbook (paths surface in `[UPLOADED FILES]`) "
+                "and you need to know the schema before running tools that "
+                "consume it (e.g. compute_variance_walk(csv_path=…))."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path":   {"type": "string",  "description": "Absolute path to the file."},
+                    "n_rows": {"type": "integer", "description": "Max rows to return (default 10)."},
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_transform_recipe",
+            "description": (
+                "Fetch a Transform's full recipe — name, description, inputs, "
+                "output_dataset_id, parameters, and the Python source. Use this "
+                "before answering 'how does this ETL work' style questions so the "
+                "explanation comes from the actual library code, not training data."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"transform_id": {"type": "string"}},
+                "required": ["transform_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_tile",
             "description": "Get a tile's saved configuration (plot/table type, source, filters).",
             "parameters": {
@@ -351,6 +390,32 @@ OPENAI_TOOLS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "rag_search",
+            "description": (
+                "Retrieval-Augmented Generation search across a folder of "
+                "documents (markdown, text, CSV, XLSX). Returns the top-k "
+                "matching chunks ranked by keyword score, each with the "
+                "source path and any frontmatter metadata (model_id, "
+                "model_component, portfolio_scope) the chunk's parent doc "
+                "carries. Use this to surface methodology / whitepaper "
+                "context behind a forecast number. doc_dir defaults to "
+                "the function's relevant doc folder (configured via the "
+                "CMA_DOCS_ROOT env var, fallback `sample_docs/`)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query":   {"type": "string",  "description": "Free-text query (multi-word)."},
+                    "doc_dir": {"type": "string",  "description": "Optional folder path to scope the search. Empty string = default root, recursive."},
+                    "top_k":   {"type": "integer", "description": "Max chunks to return (default 5)."},
+                },
+                "required": ["query", "doc_dir", "top_k"],
+            },
+        },
+    },
 ]
 
 
@@ -426,7 +491,36 @@ def _t_get_dataset_preview(args: dict) -> str:
     n = int(args.get("n", 25))
     d = _DATASETS.get(did)
     if not d:
-        return json.dumps({"error": f"Dataset `{did}` not found"})
+        # Common LLM mistake: passing a file path / uploaded-file id where a
+        # dataset_id is expected. Redirect to preview_tabular_file rather
+        # than letting the agent conclude "tools are unavailable".
+        looks_like_path = (
+            "/" in did or "\\" in did
+            or any(did.lower().endswith(ext) for ext in (
+                ".csv", ".xlsx", ".xls", ".parquet", ".pdf",
+                ".docx", ".pptx", ".md", ".txt", ".json",
+            ))
+        )
+        if looks_like_path:
+            return json.dumps({
+                "error":           f"`{did}` is a file path, not a dataset id.",
+                "fix":             (
+                    "Call `preview_tabular_file(path=...)` for files "
+                    "(supports CSV / XLSX / Parquet). `get_dataset_preview` "
+                    "only works on registered dataset ids that appear in "
+                    "the `--- input dataset ---` block of the context."
+                ),
+                "redirect_tool":   "preview_tabular_file",
+            })
+        return json.dumps({
+            "error":               f"Dataset `{did}` not found",
+            "available_datasets":  sorted(list(_DATASETS.keys()))[:20],
+            "hint":                (
+                "If the analyst attached a file via `[UPLOADED FILES]`, "
+                "use `preview_tabular_file(path=…)` instead — uploaded "
+                "files are NOT in the dataset registry."
+            ),
+        })
     df = _read_or_synth(d, n)
     if df is None:
         return json.dumps({"error": "Read failed"})
@@ -487,6 +581,90 @@ def _t_get_run(args: dict) -> str:
     rid = args.get("run_id", "") or _ctx_id_for("run")
     r = _RUNS.get(rid)
     return r.model_dump_json(indent=2) if r else json.dumps({"error": f"Run `{rid}` not found"})
+
+
+def _t_preview_tabular_file(args: dict) -> str:
+    """Read a CSV / XLSX / Parquet by absolute path and return shape +
+    first N rows. Used when an analyst attached a data file to a
+    playbook (paths surface in `[UPLOADED FILES]`) and an agent needs
+    to verify the schema before consuming it."""
+    import os
+
+    path = (args.get("path") or "").strip()
+    if not path:
+        return json.dumps({"error": "path is required"})
+    n_rows = int(args.get("n_rows") or 10)
+
+    # Allow paths relative to the docs root (so the LLM doesn't have to
+    # hand-build the absolute path when only a relative id was surfaced).
+    if not os.path.isabs(path):
+        try:
+            from routers.documents import _docs_root
+            cand = (_docs_root() / path).resolve()
+            if cand.exists():
+                path = str(cand)
+        except Exception:
+            pass
+
+    if not os.path.exists(path):
+        return json.dumps({"error": f"file not found: {path}"})
+
+    ext = os.path.splitext(path)[1].lower()
+    try:
+        if ext == ".csv":
+            df = pd.read_csv(path)
+        elif ext in (".xlsx", ".xls"):
+            df = pd.read_excel(path)
+        elif ext == ".parquet":
+            df = pd.read_parquet(path)
+        else:
+            return json.dumps({
+                "error": f"Unsupported tabular extension {ext!r}",
+                "supported": [".csv", ".xlsx", ".xls", ".parquet"],
+            })
+    except Exception as e:
+        return json.dumps({"error": f"read failed: {e}"})
+
+    return json.dumps({
+        "path":         path,
+        "row_count":    int(len(df)),
+        "column_count": int(len(df.columns)),
+        "columns":      [{"name": c, "dtype": str(df[c].dtype)} for c in df.columns],
+        "sample_rows":  _df_records(df, max(1, min(n_rows, 200))),
+        "summary":      _summarize(df),
+    }, default=_json_default)
+
+
+def _t_get_transform_recipe(args: dict) -> str:
+    """Return a Transform's full recipe — pulled from the in-process registry
+    populated by pack-shipped transforms (`backend/routers/transforms.py`).
+    Falls back to the entity-id bound to the current request if the caller
+    doesn't pass `transform_id` explicitly."""
+    from routers.transforms import _TRANSFORMS
+
+    tid = (args.get("transform_id") or "").strip() or _ctx_id_for("transform")
+    if not tid:
+        return json.dumps({"error": "transform_id is required (none in args, none on request context)"})
+    t = _TRANSFORMS.get(tid)
+    if not t:
+        return json.dumps({
+            "error":              f"Transform `{tid}` not found",
+            "available_transforms": sorted(_TRANSFORMS.keys()),
+        })
+    # Surface the recipe text first so the agent sees real code rather
+    # than guessing from the description.
+    return json.dumps({
+        "id":                    t.id,
+        "name":                  t.name,
+        "description":           t.description,
+        "function_id":           t.function_id,
+        "input_data_source_ids": list(t.input_data_source_ids or []),
+        "output_dataset_id":     t.output_dataset_id,
+        "parameters":            list(t.parameters or []),
+        "recipe_python":         t.recipe_python,
+        "source":                t.source,
+        "pack_id":               t.pack_id,
+    }, default=_json_default)
 
 
 def _t_get_tile(args: dict) -> str:
@@ -660,6 +838,153 @@ def _t_set_style(args: dict) -> str:
                        "legend_position": style.legend_position})
 
 
+# ── RAG search (built-in) ─────────────────────────────────────────────────
+# Generic keyword-scoring RAG over a folder of documents. Replaces the
+# pack-specific `search_methodology_docs` tool — any agent can use this
+# without each pack re-implementing the same loop. Demo-grade scoring;
+# swap the body for a real vector store in production.
+def _t_rag_search(args: dict) -> str:
+    import glob
+    import os
+    import re
+
+    query = (args.get("query") or "").strip()
+    if not query:
+        return json.dumps({"matches": [], "note": "empty query"})
+
+    doc_dir = (args.get("doc_dir") or "").strip()
+    if not doc_dir:
+        # Default to the configured docs root, then recurse.
+        env_root = os.getenv("CMA_DOCS_ROOT", "").strip()
+        if env_root and os.path.isdir(env_root):
+            doc_dir = env_root
+        else:
+            # Repo-relative default: <repo>/sample_docs/
+            here = os.path.dirname(os.path.abspath(__file__))
+            repo = os.path.abspath(os.path.join(here, "..", ".."))
+            doc_dir = os.path.join(repo, "sample_docs")
+
+    if not os.path.isdir(doc_dir):
+        return json.dumps({"error": f"doc_dir does not exist: {doc_dir}"})
+
+    q_tokens = [t for t in re.findall(r"[a-z0-9_]+", query.lower()) if len(t) > 2]
+    if not q_tokens:
+        return json.dumps({"matches": []})
+
+    def _read_text(path: str) -> str:
+        """Best-effort text extraction across the formats the Knowledge Base
+        accepts. Optional libraries (`pypdf`, `python-docx`, `python-pptx`)
+        are imported lazily so a missing library degrades to "skip this
+        file" rather than crashing the whole search."""
+        ext = os.path.splitext(path)[1].lower()
+        try:
+            if ext in (".md", ".txt", ".py", ".json"):
+                with open(path, encoding="utf-8", errors="ignore") as fh:
+                    return fh.read()
+            if ext == ".csv":
+                return pd.read_csv(path).to_csv(index=False)
+            if ext in (".xlsx", ".xls"):
+                return pd.read_excel(path).to_csv(index=False)
+            if ext == ".pdf":
+                try:
+                    from pypdf import PdfReader
+                except ImportError:
+                    return ""
+                reader = PdfReader(path)
+                return "\n\n".join((p.extract_text() or "") for p in reader.pages)
+            if ext == ".docx":
+                try:
+                    from docx import Document  # python-docx
+                except ImportError:
+                    return ""
+                doc = Document(path)
+                paras = [p.text for p in doc.paragraphs if p.text and p.text.strip()]
+                # Pull table cell text too — whitepapers love tables.
+                for tbl in doc.tables:
+                    for row in tbl.rows:
+                        for cell in row.cells:
+                            if cell.text and cell.text.strip():
+                                paras.append(cell.text.strip())
+                return "\n\n".join(paras)
+            if ext == ".pptx":
+                try:
+                    from pptx import Presentation  # python-pptx
+                except ImportError:
+                    return ""
+                prs = Presentation(path)
+                slides_out: list[str] = []
+                for idx, slide in enumerate(prs.slides, start=1):
+                    parts = [f"[Slide {idx}]"]
+                    for shape in slide.shapes:
+                        if shape.has_text_frame:
+                            for para in shape.text_frame.paragraphs:
+                                txt = "".join(run.text for run in para.runs)
+                                if txt and txt.strip():
+                                    parts.append(txt.strip())
+                    if len(parts) > 1:
+                        slides_out.append("\n".join(parts))
+                # Each slide becomes its own paragraph-block so the chunker
+                # treats it as a single semantic unit.
+                return "\n\n".join(slides_out)
+        except Exception:
+            return ""
+        return ""
+
+    def _parse_md(text: str) -> tuple[dict[str, str], list[str]]:
+        meta: dict[str, str] = {}
+        m = re.match(r"^---\n(.*?)\n---\n(.*)$", text, re.DOTALL)
+        body = m.group(2) if m else text
+        if m:
+            for line in m.group(1).splitlines():
+                if ":" in line:
+                    k, _, v = line.partition(":")
+                    meta[k.strip()] = v.strip().strip('"')
+        chunks = [c.strip() for c in re.split(r"\n\s*\n", body) if c.strip()]
+        return meta, chunks
+
+    top_k = int(args.get("top_k") or 5)
+
+    scored: list[dict[str, Any]] = []
+    patterns = (
+        "*.md", "*.txt", "*.py", "*.json",
+        "*.csv", "*.xlsx", "*.xls",
+        "*.pdf", "*.docx", "*.pptx",
+    )
+    seen_paths: set[str] = set()
+    for pat in patterns:
+        for path in sorted(glob.glob(os.path.join(doc_dir, "**", pat), recursive=True)):
+            if path in seen_paths:
+                continue
+            seen_paths.add(path)
+            text = _read_text(path)
+            if not text:
+                continue
+            if path.endswith(".md"):
+                meta, chunks = _parse_md(text)
+            else:
+                # Split non-md text on blank lines so PDF pages, DOCX
+                # paragraphs, and PPTX slides each become their own chunk
+                # (read_text emits `\n\n` between those boundaries).
+                meta, chunks = {}, [c.strip() for c in re.split(r"\n\s*\n", text) if c.strip()]
+            for i, chunk in enumerate(chunks):
+                tokens = re.findall(r"[a-z0-9_]+", chunk.lower())
+                score = sum(tokens.count(t) for t in q_tokens)
+                if score == 0:
+                    continue
+                preview = chunk[:480] + ("…" if len(chunk) > 480 else "")
+                scored.append({
+                    "score":           score,
+                    "model_id":        meta.get("model_id", os.path.basename(path)),
+                    "model_component": meta.get("model_component", ""),
+                    "portfolio_scope": meta.get("portfolio_scope", ""),
+                    "doc_path":        path,
+                    "chunk_index":     i,
+                    "preview":         preview,
+                })
+    scored.sort(key=lambda r: -r["score"])
+    return json.dumps({"query": query, "doc_dir": doc_dir, "matches": scored[:top_k]})
+
+
 # ── Handler ───────────────────────────────────────────────────────────────
 _HANDLERS = {
     "get_workspace":      _t_get_workspace,
@@ -670,6 +995,8 @@ _HANDLERS = {
     "get_model_metrics":  _t_get_model_metrics,
     "validate_workflow":  _t_validate_workflow,
     "get_run":            _t_get_run,
+    "get_transform_recipe": _t_get_transform_recipe,
+    "preview_tabular_file": _t_preview_tabular_file,
     "get_tile":           _t_get_tile,
     "get_tile_preview":   _t_get_tile_preview,
     "apply_tile_filter":  _t_apply_tile_filter,
@@ -680,6 +1007,8 @@ _HANDLERS = {
     "set_axes":           _t_set_axes,
     "set_axis_labels":    _t_set_axis_labels,
     "set_style":          _t_set_style,
+    # Generic RAG retrieval — replaces the deposits-pack scoped variant.
+    "rag_search":         _t_rag_search,
 }
 
 

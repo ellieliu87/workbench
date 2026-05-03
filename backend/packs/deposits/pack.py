@@ -16,6 +16,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from packs import Pack, PackContext
+from packs.deposits.tools import register_python_tools
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 _SAMPLE_DATA = _REPO_ROOT / "sample_data" / "deposits"
@@ -42,6 +43,14 @@ def register(ctx: PackContext) -> None:
         color="#0EA5E9",
         icon="piggy-bank",
     )
+
+    # 1b) Skills + Python tools — backs the four-agent CCAR variance
+    #     attribution playbook (Quant → Modeler → LOB Finance Lead →
+    #     Fact-Checker). The skills land under Settings → Agent Skills →
+    #     Domain Pack — deposits; tools under Settings → Python Tools →
+    #     Domain Pack — deposits.
+    ctx.register_skill_dir()         # default: <pack_dir>/skills
+    register_python_tools(ctx)
 
     # 2) Dataset — the macro-scenario wide table the Data Harness reads.
     #    Logically sourced from OneLake: in the corporate proxy

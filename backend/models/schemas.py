@@ -133,7 +133,7 @@ class ChatMessage(BaseModel):
         "overview", "data", "models", "workflow", "playbooks",
         "analytics", "reporting", "settings",
     ] | None = None
-    entity_kind: Literal["kpi", "dataset", "scenario", "model", "run", "tile", "workflow", "analytic_def"] | None = None
+    entity_kind: Literal["kpi", "dataset", "scenario", "model", "run", "tile", "workflow", "analytic_def", "transform"] | None = None
     entity_id: str | None = None
     # Optional payload — for workflow validation we pass nodes/edges
     payload: dict[str, Any] | None = None
@@ -849,6 +849,12 @@ class DataServiceCard(BaseModel):
     icon: str           # lucide-react icon name (frontend resolves)
     tag: str
     agent_prompt: str = Field(alias="agent_prompt")
+    # Optional deep links — populated for cards backed by a registry
+    # entity. transform_id binds Data Harness / DQC cards to the
+    # transform-explainer chat path; scenario_id drives the Eye / Preview
+    # button on CCAR + Outlook cards.
+    transform_id: str | None = None
+    scenario_id: str | None = None
 
     model_config = {"populate_by_name": True}
 
@@ -894,6 +900,18 @@ class Playbook(BaseModel):
     function_id: str
     name: str
     description: str | None = None
+    # Problem framing — analyst describes the analytical question the
+    # playbook is meant to answer. Surfaced to every phase as
+    # `[PROBLEM STATEMENT]` in the agent's context so the specialists
+    # don't have to re-derive intent from the phase instructions alone.
+    problem_statement: str | None = None
+    # Document ids (relative paths under sample_docs/uploads/) the
+    # analyst attached to the playbook. Files live in the universal
+    # Knowledge Base store (router/documents.py) under
+    # `playbook/<id>/`. Made discoverable to phase agents through
+    # `[UPLOADED FILES]` context + the universal `rag_search` tool's
+    # default scan.
+    uploaded_file_ids: list[str] = Field(default_factory=list)
     phases: list[PlaybookPhase] = Field(default_factory=list)
     created_at: str
     updated_at: str | None = None
@@ -903,12 +921,20 @@ class PlaybookCreate(BaseModel):
     function_id: str
     name: str
     description: str | None = None
+    problem_statement: str | None = None
+    uploaded_file_ids: list[str] = Field(default_factory=list)
     phases: list[PlaybookPhase] = Field(default_factory=list)
+    # Optional client-supplied id — lets the frontend pre-allocate an
+    # id so it can scope file uploads under `playbook/<id>/` before the
+    # playbook is persisted. Backend generates one when not provided.
+    id: str | None = None
 
 
 class PlaybookUpdate(BaseModel):
     name: str | None = None
     description: str | None = None
+    problem_statement: str | None = None
+    uploaded_file_ids: list[str] | None = None
     phases: list[PlaybookPhase] | None = None
 
 

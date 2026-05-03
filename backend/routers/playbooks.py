@@ -100,11 +100,50 @@ def _build_phase_context(
     ctx_parts: list[str] = [
         f"function_id: {function_id}",
         f"playbook: {playbook.name}",
+        f"playbook_id: {playbook.id}",
         f"phase_id: {phase.id}",
         f"phase_name: {phase.name}",
     ]
     if playbook.description:
         ctx_parts.append(f"playbook_description: {playbook.description}")
+
+    # Problem statement — the analyst's framing of the question. Surfaced
+    # to every phase as a top-level block so the agent answers in the
+    # context of the playbook's overall purpose, not just its own phase.
+    if playbook.problem_statement:
+        ctx_parts.append(
+            "[PROBLEM STATEMENT]\n" + playbook.problem_statement.strip()
+        )
+
+    # Uploaded files — surface paths in a tool-friendly shape.
+    #
+    # Tools (preview_tabular_file, compute_variance_walk, rag_search)
+    # accept paths relative to the docs root, so the **relative id** is
+    # the recommended argument value — it's short, contains no
+    # backslashes, and survives JSON encoding cleanly. We also emit a
+    # forward-slash absolute path for the rare case the agent needs it
+    # (e.g. some MCP servers want absolute filesystem paths).
+    if playbook.uploaded_file_ids:
+        from routers.documents import _docs_root  # late import — avoids cycles
+        root = _docs_root()
+        scope_dir = (root / "playbook" / playbook.id).as_posix()
+        rendered = []
+        for fid in playbook.uploaded_file_ids:
+            # `fid` already uses forward slashes (DocumentInfo normalizes).
+            abs_path = (root / fid).as_posix()
+            rendered.append(f"- `{fid}`  (absolute: `{abs_path}`)")
+        ctx_parts.append(
+            "[UPLOADED FILES]\n"
+            "These files were attached to this playbook by the analyst. "
+            "Pass the relative id (e.g. `playbook/<id>/file.csv`) to any "
+            "tool that takes a path — the tools resolve it against the "
+            "docs root automatically.\n"
+            f"- For `rag_search`, scope to this playbook with "
+            f"`doc_dir=\"{scope_dir}\"`, or omit `doc_dir` to scan the "
+            "whole corpus.\n"
+            "Files:\n"
+            + "\n".join(rendered)
+        )
 
     for inp in phase.inputs:
         if inp.kind == "dataset" and inp.ref_id:
@@ -269,19 +308,41 @@ def _build_final_report(run: PlaybookRun, playbook: Playbook) -> str:
 # (FastAPI matches in registration order; otherwise /runs etc. get swallowed)
 
 @router.get("/_skills")
-async def list_available_skills(_: str = Depends(get_current_user)):
-    """List loadable skill names for the phase skill picker."""
-    return [
-        {
+async def list_available_skills(
+    function_id: str | None = Query(default=None),
+    _: str = Depends(get_current_user),
+):
+    """List loadable skill names for the phase skill picker.
+
+    When `function_id` is supplied, pack skills are filtered the same
+    way the chat orchestrator filters its delegate pool: a pack skill
+    is in scope only if its pack's `attach_to_functions` is empty
+    (universal) or includes the supplied function_id. Built-in / user
+    skills are always in scope. With no `function_id`, every skill is
+    returned (callers without workspace context).
+    """
+    from packs import get_pack
+
+    out = []
+    for s in list_skills():
+        # Hide the orchestrator from the phase picker — it's the chat
+        # router, not a phase specialist.
+        if s.name == "orchestrator":
+            continue
+        if function_id and s.source == "pack" and s.pack_id:
+            pack = get_pack(s.pack_id)
+            attach = list(pack.attach_to_functions) if pack else []
+            if attach and function_id not in attach:
+                continue
+        out.append({
             "name": s.name,
             "description": s.description,
             "source": s.source,
             "pack_id": s.pack_id,
             "color": s.color,
             "icon": s.icon,
-        }
-        for s in list_skills()
-    ]
+        })
+    return out
 
 
 @router.get("/runs", response_model=list[PlaybookRun])
@@ -420,7 +481,17 @@ async def get_playbook(playbook_id: str, _: str = Depends(get_current_user)):
 
 @router.post("", response_model=Playbook, status_code=201)
 async def create_playbook(req: PlaybookCreate, _: str = Depends(get_current_user)):
-    pid = f"pbk-{uuid.uuid4().hex[:10]}"
+    # Honor a client-supplied id if present and well-formed so the
+    # frontend can pre-allocate the id for upload scoping. Reject ids
+    # that already exist or that contain unsafe characters.
+    pid = (req.id or "").strip()
+    if pid:
+        if not all(c.isalnum() or c in "-_" for c in pid):
+            raise HTTPException(status_code=400, detail="invalid playbook id")
+        if pid in _PLAYBOOKS:
+            raise HTTPException(status_code=409, detail="playbook id already exists")
+    else:
+        pid = f"pbk-{uuid.uuid4().hex[:10]}"
     # Re-id phases sequentially so they're predictable
     fixed_phases = [
         PlaybookPhase(**{**ph.model_dump(), "id": f"phase-{i + 1}"})
@@ -431,6 +502,8 @@ async def create_playbook(req: PlaybookCreate, _: str = Depends(get_current_user
         function_id=req.function_id,
         name=req.name,
         description=req.description,
+        problem_statement=req.problem_statement,
+        uploaded_file_ids=list(req.uploaded_file_ids or []),
         phases=fixed_phases,
         created_at=_now(),
     )
@@ -451,6 +524,10 @@ async def update_playbook(
         p.name = req.name
     if req.description is not None:
         p.description = req.description
+    if req.problem_statement is not None:
+        p.problem_statement = req.problem_statement
+    if req.uploaded_file_ids is not None:
+        p.uploaded_file_ids = list(req.uploaded_file_ids)
     if req.phases is not None:
         p.phases = [
             PlaybookPhase(**{**ph.model_dump(), "id": f"phase-{i + 1}"})

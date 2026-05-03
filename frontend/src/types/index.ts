@@ -123,6 +123,11 @@ export interface DataServiceCard {
   icon: string         // lucide-react icon name
   tag: string
   agent_prompt: string
+  // Optional deep links — set on cards backed by a real registry entity:
+  //   transform_id  — Data Harness / DQC cards bind chat to entity_kind=transform
+  //   scenario_id   — CCAR / Outlook cards drive the Preview button
+  transform_id?: string | null
+  scenario_id?: string | null
 }
 
 export interface DataServicesIntegrationStatus {
@@ -561,6 +566,12 @@ export interface Playbook {
   function_id: string
   name: string
   description?: string | null
+  // Analyst's framing of the question this playbook is meant to answer.
+  // Surfaced to every phase as a [PROBLEM STATEMENT] block.
+  problem_statement?: string | null
+  // Document ids (relative paths under sample_docs/uploads/) the analyst
+  // attached to the playbook. The agent reaches them via rag_search.
+  uploaded_file_ids?: string[]
   phases: PlaybookPhase[]
   created_at: string
   updated_at?: string | null

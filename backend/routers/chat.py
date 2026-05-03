@@ -80,6 +80,8 @@ def _route(req: ChatMessage) -> str:
         return "macro-economist"
     if req.entity_kind == "model":
         return "model-explainer"
+    if req.entity_kind == "transform":
+        return "transform-explainer"
     if req.entity_kind == "run":
         return "run-troubleshooter" if ("fail" in msg or "error" in msg) else "model-explainer"
     if req.entity_kind == "tile":
@@ -209,6 +211,7 @@ async def send_message(req: ChatMessage, _: str = Depends(get_current_user)):
         if target == "orchestrator":
             text = await _ORCH.chat_orchestrator(
                 req.message, extra_context=ctx, history=history,
+                function_id=req.function_id,
             )
         else:
             text, trace_dicts = await _ORCH.chat_specialist_with_trace(

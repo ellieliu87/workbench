@@ -1,29 +1,32 @@
 import { useNavigate, useParams } from 'react-router-dom'
-import { Database, Wrench, Code2, Server } from 'lucide-react'
-import DataSourcesTab from './DataSourcesTab'
+import { BookOpen, Wrench, Code2, Server } from 'lucide-react'
+import KnowledgeBaseTab from './KnowledgeBaseTab'
 import SkillsTab from './SkillsTab'
 import ToolsTab from './ToolsTab'
 import McpServersTab from './McpServersTab'
 
 const TABS = [
-  { id: 'datasources', label: 'Data Sources', icon: Database },
-  { id: 'skills',      label: 'Agent Skills', icon: Wrench },
-  { id: 'tools',       label: 'Python Tools', icon: Code2 },
-  { id: 'mcp',         label: 'MCP Servers',  icon: Server },
+  { id: 'knowledge',   label: 'Knowledge Base', icon: BookOpen },
+  { id: 'skills',      label: 'Agent Skills',   icon: Wrench },
+  { id: 'tools',       label: 'Agent Tools',    icon: Code2 },
+  { id: 'mcp',         label: 'MCP Servers',    icon: Server },
 ] as const
 
 export default function SettingsPage() {
   const { tab } = useParams<{ tab?: string }>()
   const navigate = useNavigate()
-  const active = (tab as (typeof TABS)[number]['id']) || 'datasources'
+  // 'datasources' is the legacy route id — keep redirecting it to knowledge
+  // base so any saved bookmarks / chat-shared links keep working.
+  const rawTab = tab === 'datasources' ? 'knowledge' : (tab as (typeof TABS)[number]['id'] | undefined)
+  const active = rawTab || 'knowledge'
 
   return (
     <div className="max-w-[1320px] mx-auto animate-fade-in">
       <div className="mb-6">
         <h1 className="page-header">Settings</h1>
         <p className="text-sm" style={{ color: 'var(--text-muted)' }}>
-          Configure the data sources your workspaces and agent will use, manage agent skills,
-          and design custom plots that can be added to any workspace.
+          Upload reference documents the agents can search, manage agent skills,
+          register Python tools, and connect MCP servers.
         </p>
       </div>
 
@@ -52,7 +55,7 @@ export default function SettingsPage() {
         })}
       </div>
 
-      {active === 'datasources' && <DataSourcesTab />}
+      {active === 'knowledge' && <KnowledgeBaseTab />}
       {active === 'skills' && <SkillsTab />}
       {active === 'tools' && <ToolsTab />}
       {active === 'mcp' && <McpServersTab />}
