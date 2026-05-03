@@ -19,6 +19,14 @@ from fastapi.middleware.cors import CORSMiddleware
 import packs as _packs
 _packs.discover_and_register()
 
+# Bridge pack-registered Python tools into the agent runtime. Pack tools
+# are added to the Settings UI registry by `register_python_tool(...)`,
+# but agents dispatch through `agent.tools._HANDLERS` — this hop merges
+# them so any skill that lists a pack tool in its frontmatter can
+# actually call it. Idempotent; safe to call once on startup.
+from agent.tools import register_pack_tools as _register_pack_tools
+_register_pack_tools()
+
 # Build the live MCP server registry from pack attachments BEFORE importing
 # routers — `routers.chat` instantiates the orchestrator at import time,
 # which constructs each specialist agent and calls

@@ -1023,6 +1023,111 @@ def handle_tool_call(name: str, args: dict) -> str:
         return json.dumps({"error": str(e), "traceback": traceback.format_exc()[-500:]})
 
 
+# ── Pack-tool bridge ──────────────────────────────────────────────────────
+# Pack-registered tools (`ctx.register_python_tool(...)`) end up in
+# `packs._PYTHON_TOOL_SEEDS`, which is consumed by `routers/tools.py` for
+# the Settings UI registry. They need to be merged into `OPENAI_TOOLS` +
+# `_HANDLERS` for any agent to actually call them — that's what
+# `register_pack_tools()` does. main.py invokes this once at startup,
+# right after `packs.discover_and_register()` populates the seed list.
+_PACK_TOOLS_REGISTERED = False
+
+
+def _spec_from_seed(seed: dict) -> dict[str, Any]:
+    """Build an OpenAI-format function spec from a pack tool seed."""
+    properties: dict[str, Any] = {}
+    required: list[str] = []
+    for p in seed.get("parameters", []) or []:
+        properties[p["name"]] = {
+            "type": p.get("type", "string"),
+            "description": p.get("description", ""),
+        }
+        if p.get("required"):
+            required.append(p["name"])
+    return {
+        "type": "function",
+        "function": {
+            "name": seed["name"],
+            "description": seed.get("description", ""),
+            "parameters": {
+                "type": "object",
+                "properties": properties,
+                "required": required,
+            },
+        },
+    }
+
+
+def _make_pack_handler(seed: dict):
+    """Compile the seed's python_source once and return a handler that
+    invokes the entry-point function with the model-supplied args.
+
+    Pack source is exec'd in-process at registration time. That's safe
+    because pack code is shipped with the platform (not analyst-supplied
+    runtime input). For analyst-uploaded tools the Settings test path
+    still uses subprocess isolation — see routers/tools.py:_run_tool."""
+    code = seed["python_source"]
+    fn_name = seed.get("function_name") or seed["name"]
+    ns: dict[str, Any] = {}
+    exec(compile(code, f"<pack tool {seed['name']}>", "exec"), ns)
+    fn = ns.get(fn_name)
+    if not callable(fn):
+        raise RuntimeError(f"Pack tool `{seed['name']}` has no callable {fn_name!r}")
+
+    def handler(args: dict) -> str:
+        try:
+            result = fn(**(args or {}))
+            return json.dumps(result, default=_json_default)
+        except Exception as e:
+            import traceback as _tb
+            return json.dumps({
+                "error":     str(e),
+                "traceback": _tb.format_exc()[-500:],
+            })
+    return handler
+
+
+def register_pack_tools() -> int:
+    """Merge every pack-registered Python tool into the agent runtime.
+
+    Idempotent — calling more than once is a no-op. Returns the number of
+    pack tools registered.
+
+    A pack tool collides with a built-in only when their `name` matches —
+    in that case the built-in wins (we log and skip the pack version).
+    """
+    global _PACK_TOOLS_REGISTERED
+    if _PACK_TOOLS_REGISTERED:
+        return 0
+    _PACK_TOOLS_REGISTERED = True
+
+    from packs import python_tool_seeds
+
+    log = __import__("logging").getLogger("cma.agent.tools")
+    n = 0
+    for seed in python_tool_seeds():
+        name = seed["name"]
+        if name in _HANDLERS:
+            log.warning(
+                "Pack tool `%s` (pack=%s) collides with built-in handler — keeping built-in",
+                name, seed.get("pack_id"),
+            )
+            continue
+        try:
+            handler = _make_pack_handler(seed)
+        except Exception as e:
+            log.error(
+                "Pack tool `%s` (pack=%s) failed to compile at registration: %s",
+                name, seed.get("pack_id"), e,
+            )
+            continue
+        OPENAI_TOOLS.append(_spec_from_seed(seed))
+        _HANDLERS[name] = handler
+        n += 1
+    log.info("Registered %d pack tool(s) into the agent runtime", n)
+    return n
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────
 def _read_or_synth(d, n: int = 2000) -> pd.DataFrame | None:
     if d.source_kind == "upload" and d.file_path and d.file_format:
