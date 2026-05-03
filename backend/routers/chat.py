@@ -311,6 +311,19 @@ async def list_feedback(_: str = Depends(get_current_user)):
     return list(_FEEDBACK_LOG[-500:])  # cap response size
 
 
+@router.post("/_diag/reset-llm-client")
+async def diag_reset_llm_client(_: str = Depends(get_current_user)):
+    """Drop the cached AsyncOpenAI client so the next chat call constructs
+    a fresh one. Use this when the corporate COF proxy starts returning
+    `401 invalid kubernetes service token` — typically the K8s SA token
+    has rotated since the client was constructed. Cheaper than restarting
+    the pod."""
+    from cof.llm_config import reset_async_client
+    reset_async_client()
+    log.info("LLM client reset by user request")
+    return {"ok": True, "message": "Client reset; next chat call will reconstruct."}
+
+
 # Re-export the validation helper (kept for backwards compatibility with the
 # scenarios.py /workflow-validate endpoint that imports from here).
 from routers.chat_validation import validate_workflow_payload as _validate_workflow_payload  # noqa: F401

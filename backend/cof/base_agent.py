@@ -228,19 +228,19 @@ class CofBaseAgent:
 
         try:
             from agents import set_tracing_disabled
-            from openai import AsyncOpenAI
+            from cof.llm_config import get_async_client
             set_tracing_disabled(True)
 
             allowed = set(skill.tools) if skill.tools else None
             self._function_tools = _filter_tools(openai_tools, allowed, tool_handler)
 
-            # Match oasia: AsyncOpenAI() with no arguments. The SDK reads
-            # OPENAI_BASE_URL / OPENAI_API_KEY from the environment, and
-            # the corporate COF proxy resolves transparently inside the
-            # company network. Setting base_url= ourselves can route
-            # around the proxy and break in environments where the
-            # corporate SDK is preconfigured.
-            self._client = AsyncOpenAI()
+            # Use the process-wide shared AsyncOpenAI client. With ~28
+            # loaded skills we'd otherwise construct ~28 clients at
+            # backend startup — each of which reads the K8s SA token in
+            # COF environments. Sharing one client avoids that pressure
+            # and ensures every agent uses the same (freshly resolved)
+            # auth state. See cof/llm_config.get_async_client.
+            self._client = get_async_client()
             self._model = OpenAIChatCompletionsModel(
                 model=skill.model, openai_client=self._client,
             )

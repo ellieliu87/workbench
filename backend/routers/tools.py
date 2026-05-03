@@ -400,14 +400,13 @@ async def draft_tool(req: ToolDraftRequest, _: str = Depends(get_current_user)):
     configured, returns 503 with a setup-required message.
     """
     try:
-        from openai import AsyncOpenAI
+        from cof.llm_config import get_async_client
     except ImportError:
         raise HTTPException(status_code=503, detail="openai package not installed.")
 
-    # Match oasia: AsyncOpenAI() with no arguments. The SDK auto-resolves
-    # OPENAI_BASE_URL / OPENAI_API_KEY from the environment; corporate COF
-    # proxy environments preconfigure these so no env vars need to be set.
-    client = AsyncOpenAI()
+    # Reuse the process-wide shared AsyncOpenAI client. Same client every
+    # agent uses, so corporate COF auth stays coherent across requests.
+    client = get_async_client()
 
     user_msg = req.prompt.strip()
     if req.context:

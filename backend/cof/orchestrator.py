@@ -164,7 +164,7 @@ class AsyncOrchestrator:
     def _reload_skills(self) -> None:
         """Re-read every skill from disk; rebuild agents."""
         from agents import OpenAIChatCompletionsModel
-        from openai import AsyncOpenAI
+        from cof.llm_config import get_async_client
 
         self._skills: dict[str, AgentSkill] = {
             _norm(s.name): s for s in load_all_skills().values()
@@ -200,13 +200,14 @@ class AsyncOrchestrator:
             if short_name not in self._sub_agents:
                 log.warning("Delegate skill not found: %s", short_name)
 
-        # Match oasia exactly: AsyncOpenAI() with no arguments. The openai
-        # SDK auto-discovers `OPENAI_BASE_URL` / `OPENAI_API_KEY` from the
-        # environment, and the COF proxy resolves transparently when the
-        # backend is running inside the corporate network.
+        # Reuse the process-wide shared AsyncOpenAI client (constructed
+        # lazily on first use by `cof/llm_config.get_async_client`).
+        # Sharing one client across all agents — orchestrator + every
+        # specialist — avoids 28× duplicate token reads at startup in
+        # COF environments and keeps auth state coherent.
         from agents import set_tracing_disabled
         set_tracing_disabled(True)
-        self._client = AsyncOpenAI()
+        self._client = get_async_client()
         self._orch_model = OpenAIChatCompletionsModel(
             model=orch_skill.model, openai_client=self._client,
         )
